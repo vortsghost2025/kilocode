@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test"
+import { ForegroundTask } from "../../src/kilocode/foreground-task"
+import { Interrupt } from "../../src/kilocode/interrupt"
 import { SessionID } from "../../src/session/schema"
 import { mountPromptControl } from "../fixture/tui-control-harness"
+
+type HarnessInput = Parameters<typeof mountPromptControl>[0]
+type Cleanup = Parameters<NonNullable<HarnessInput["onRestore"]>>[0]
+type Host = typeof globalThis & { window?: unknown }
 
 const parentID = SessionID.make("ses_parent")
 const childID = SessionID.make("ses_child")
@@ -31,7 +37,7 @@ async function run(input: { matchingMetadata: boolean; runtimeOwnership: boolean
 
 test("runtime ownership and synchronized task metadata independently enable foreground interruption", async () => {
   const stale = await run({ matchingMetadata: false, runtimeOwnership: true })
-  const matching = await run({ matchingMetadata: true, runtimeOwnership: true })
+  const matching = await run({ matchingMetadata: true, runtimeOwnership: false })
   const none = await run({ matchingMetadata: false, runtimeOwnership: false })
 
   console.log(
@@ -71,7 +77,156 @@ test("runtime ownership and synchronized task metadata independently enable fore
   expect(none.abortSessionIDs).toEqual([])
 }, 30_000)
 
+test("runtime-only ownership completes exact-child interrupt lifecycle once", async () => {
+  const harness = await mountPromptControl({
+    parentID,
+    childID,
+    siblingID,
+    matchingMetadata: false,
+    runtimeOwnership: true,
+  })
 
+  try {
+    expect(harness.active()).toBe(true)
+    harness.trigger("session.interrupt")
+    await harness.renderOnce()
+    harness.advance(100)
+    harness.trigger("session.interrupt")
+    await harness.renderOnce()
+    expect(harness.commandState.enabled).toBe(true)
+    expect(harness.commandState.selected).toBe(2)
+    expect(harness.abortSessionIDs).toEqual([childID])
+
+    expect(harness.interruptRuntime()).toBe(true)
+    await harness.renderOnce()
+    expect(harness.active()).toBe(false)
+    const success = harness.lifecycle().filter((result) => result.actions.some((action) => action.type === "success"))
+    expect(success).toHaveLength(1)
+    expect(success[0]?.state).toMatchObject({ pending: false, target: null })
+    const notices = harness.toasts.filter(
+      (toast) => toast.variant === "info" && toast.message === "Subagent stopped; context preserved.",
+    )
+    expect(notices).toHaveLength(1)
+
+    const selected = harness.commandState.selected
+    harness.trigger("session.interrupt")
+    await harness.renderOnce()
+    expect(harness.commandState.enabled).toBe(false)
+    expect(harness.commandState.selected).toBe(selected)
+
+    harness.setMetadata(true)
+    await harness.renderOnce()
+    harness.setMetadata(false)
+    await harness.renderOnce()
+    expect(harness.lifecycle().filter((result) => result.actions.some((action) => action.type === "success"))).toHaveLength(1)
+    expect(
+      harness.toasts.filter(
+        (toast) => toast.variant === "info" && toast.message === "Subagent stopped; context preserved.",
+      ),
+    ).toHaveLength(1)
+    expect(harness.lifecycle().at(-1)?.state).toMatchObject({ pending: false, target: null })
+  } finally {
+    await harness.dispose()
+  }
+}, 30_000)
+
+test("renderer cleanup restores animation-frame property presence", async () => {
+  const harness = await mountPromptControl({
+    parentID,
+    childID,
+    siblingID,
+    matchingMetadata: false,
+    runtimeOwnership: false,
+  })
+  const original = harness.frame.original
+
+  await harness.dispose()
+  expect(harness.frame.current()).toEqual(original)
+}, 30_000)
+
+test("mount failure restores probes before a subsequent normal harness", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(Interrupt, "onForegroundTask")
+  if (!descriptor) throw new Error("interrupt lifecycle reducer is unavailable")
+  const host = globalThis as Host
+  const frame = () => ({
+    raf: globalThis.requestAnimationFrame,
+    hasRaf: Object.prototype.hasOwnProperty.call(globalThis, "requestAnimationFrame"),
+    caf: globalThis.cancelAnimationFrame,
+    hasCaf: Object.prototype.hasOwnProperty.call(globalThis, "cancelAnimationFrame"),
+  })
+  const original = {
+    frame: frame(),
+    env: Object.getOwnPropertyDescriptor(process.env, "OTUI_USE_CONSOLE"),
+    window: host.window,
+    hasWindow: Object.prototype.hasOwnProperty.call(host, "window"),
+    date: Date.now,
+    timeout: globalThis.setTimeout,
+    clear: globalThis.clearTimeout,
+    sighup: [...process.listeners("SIGHUP")],
+  }
+  const failure = new Error("forced foreground harness mount failure")
+  const cleanups: Cleanup[] = []
+  const result = await mountPromptControl({
+    parentID,
+    childID,
+    siblingID,
+    matchingMetadata: false,
+    runtimeOwnership: true,
+    failure,
+    onRestore: (evidence) => {
+      cleanups.push(evidence)
+    },
+  }).then(
+    (harness) => ({ harness }),
+    (err: unknown) => ({ err }),
+  )
+  if ("harness" in result) {
+    await result.harness.dispose()
+    throw new Error("forced harness mount unexpectedly succeeded")
+  }
+
+  expect(result.err).toBe(failure)
+  expect(Object.getOwnPropertyDescriptor(Interrupt, "onForegroundTask")).toEqual(descriptor)
+  expect(frame()).toEqual(original.frame)
+  expect(Object.getOwnPropertyDescriptor(process.env, "OTUI_USE_CONSOLE")).toEqual(original.env)
+  expect(host.window).toBe(original.window)
+  expect(Object.prototype.hasOwnProperty.call(host, "window")).toBe(original.hasWindow)
+  expect(Date.now).toBe(original.date)
+  expect(globalThis.setTimeout).toBe(original.timeout)
+  expect(globalThis.clearTimeout).toBe(original.clear)
+  expect(process.listeners("SIGHUP")).toEqual(original.sighup)
+  expect(ForegroundTask.has(childID)).toBe(false)
+  expect(ForegroundTask.has(siblingID)).toBe(false)
+  expect(cleanups).toEqual([{ listeners: 0, pending: 0, rendererDestroyed: true, toastRestored: true }])
+
+  const harness = await mountPromptControl({
+    parentID,
+    childID,
+    siblingID,
+    matchingMetadata: false,
+    runtimeOwnership: true,
+  })
+  try {
+    expect(harness.lifecycle()).toHaveLength(0)
+    harness.trigger("session.interrupt")
+    await harness.renderOnce()
+    harness.advance(100)
+    harness.trigger("session.interrupt")
+    await harness.renderOnce()
+    expect(harness.abortSessionIDs).toEqual([childID])
+    expect(harness.interruptRuntime()).toBe(true)
+    await harness.renderOnce()
+    expect(harness.lifecycle()).toHaveLength(1)
+    expect(harness.lifecycle()[0]?.actions).toEqual([{ type: "success" }])
+    expect(harness.lifecycle()[0]?.state).toMatchObject({ pending: false, target: null })
+  } finally {
+    await harness.dispose()
+  }
+  expect(Object.getOwnPropertyDescriptor(Interrupt, "onForegroundTask")).toEqual(descriptor)
+  expect(frame()).toEqual(original.frame)
+  expect(Object.getOwnPropertyDescriptor(process.env, "OTUI_USE_CONSOLE")).toEqual(original.env)
+  expect(ForegroundTask.has(childID)).toBe(false)
+}, 30_000)
 
 test("exact-child ownership updates after mount without sibling interference", async () => {
   const harness = await mountPromptControl({

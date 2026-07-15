@@ -9,7 +9,7 @@ import { EmptyBorder, SplitBorder } from "@tui/component/border"
 import { useSDK } from "@tui/context/sdk"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
-import { MessageID, PartID, SessionID } from "@/session/schema"
+import { MessageID, PartID, SessionID } from "@/session/schema" // kilocode_change
 import { createStore, produce } from "solid-js/store"
 import { useKeybind } from "@tui/context/keybind"
 import { usePromptHistory, type PromptInfo } from "./history"
@@ -127,16 +127,17 @@ export function Prompt(props: PromptProps) {
       parts: sync.data.part,
     })
   })
+  const foregroundChildActive = createMemo(() => runtimeForegroundTaskActive() || foregroundTaskActive())
 
   createEffect(
     on(statusType, (next, prev) => {
-      const res = Interrupt.onStatus(interrupt(), prev, next ?? "idle", child(), foregroundTaskActive())
+      const res = Interrupt.onStatus(interrupt(), prev, next ?? "idle", child(), foregroundChildActive())
       setInterrupt(res.state)
     }),
   )
 
   createEffect(
-    on(foregroundTaskActive, (next, prev) => {
+    on(foregroundChildActive, (next, prev) => {
       const res = Interrupt.onForegroundTask(interrupt(), prev ?? false, next)
       setInterrupt(res.state)
       for (const action of res.actions) {
@@ -151,7 +152,7 @@ export function Prompt(props: PromptProps) {
     const current = interrupt()
     if (current.target !== "child") return
     if (child()) return
-    const res = Interrupt.onChildRemoved(current, foregroundTaskActive())
+    const res = Interrupt.onChildRemoved(current, foregroundChildActive())
     setInterrupt(res.state)
   })
   // kilocode_change end
@@ -322,10 +323,7 @@ export function Prompt(props: PromptProps) {
         category: "Session",
         hidden: true,
         // kilocode_change start - child-aware interrupt handler with normal-session error support
-        enabled: Interrupt.available(
-          statusType(),
-          runtimeForegroundTaskActive() || foregroundTaskActive(),
-        ),
+        enabled: Interrupt.available(statusType(), foregroundChildActive()),
           onSelect: (dialog) => {
           if (autocomplete.visible) return
           if (!input.focused && !child()) return

@@ -1,11 +1,14 @@
+// kilocode_change - new file
 import { mock } from "bun:test"
 import { engine, RGBA, SyntaxStyle } from "@opentui/core"
 import { testRender } from "@opentui/solid"
-import type { Event, Session, ToolPart } from "@kilocode/sdk/v2"
+import type { AssistantMessage, Event, Session, ToolPart } from "@kilocode/sdk/v2"
 import { PassThrough, Readable } from "node:stream"
-import { onMount, type ParentProps } from "solid-js"
+import { onCleanup, onMount, type ParentProps } from "solid-js"
 import { ForegroundTask } from "../../src/kilocode/foreground-task"
+import { Interrupt } from "../../src/kilocode/interrupt"
 import { SessionID } from "../../src/session/schema"
+import type { ToastContext, ToastOptions } from "../../src/cli/cmd/tui/ui/toast"
 
 const color = RGBA.fromInts(220, 220, 220)
 const passthrough = (props: ParentProps) => props.children
@@ -49,12 +52,21 @@ mock.module("@tui/context/local", () => ({
   useLocal: () => local,
 }))
 
+type Cleanup = {
+  listeners: number
+  pending: number
+  rendererDestroyed: boolean
+  toastRestored: boolean
+}
+
 type Input = {
   parentID: SessionID
   childID: SessionID
   siblingID: SessionID
   matchingMetadata: boolean
   runtimeOwnership: boolean
+  failure?: Error
+  onRestore?: (evidence: Cleanup) => void
 }
 
 type Listener = (event: Event) => void
@@ -95,9 +107,11 @@ export async function mountPromptControl(input: Input) {
     date: Date.now,
     timeout: globalThis.setTimeout,
     clear: globalThis.clearTimeout,
-    env: process.env.OTUI_USE_CONSOLE,
+    env: Object.getOwnPropertyDescriptor(process.env, "OTUI_USE_CONSOLE"),
     raf: globalThis.requestAnimationFrame,
+    hasRaf: Object.prototype.hasOwnProperty.call(globalThis, "requestAnimationFrame"),
     caf: globalThis.cancelAnimationFrame,
+    hasCaf: Object.prototype.hasOwnProperty.call(globalThis, "cancelAnimationFrame"),
     window: host.window,
     hasWindow: Object.prototype.hasOwnProperty.call(host, "window"),
     windowRaf: host.window?.requestAnimationFrame,
@@ -113,7 +127,7 @@ export async function mountPromptControl(input: Input) {
     (a, b) => a.id.localeCompare(b.id),
   )
   const messageID = `msg_${input.parentID}`
-  const message = {
+  const message: AssistantMessage = {
     id: messageID,
     sessionID: input.parentID,
     role: "assistant" as const,
@@ -216,6 +230,8 @@ export async function mountPromptControl(input: Input) {
     selected: 0,
     status: undefined as string | undefined,
   }
+  const toasts: ToastOptions[] = []
+  const lifecycle: ReturnType<typeof Interrupt.onForegroundTask>[] = []
   let syncStatus = () => undefined as string | undefined
   let syncParent = async () => {}
   let syncEvidence: () => Evidence = () => ({
@@ -226,6 +242,70 @@ export async function mountPromptControl(input: Input) {
   })
   let trigger = (_name: string) => {}
   const disposers = new Set<() => void>()
+  let setup: Awaited<ReturnType<typeof testRender>> | undefined
+  let toast: ToastContext | undefined
+  let show: ToastContext["show"] | undefined
+  let descriptor: PropertyDescriptor | undefined
+  let timersPatched = false
+  let syntaxDestroyed = false
+  let now = 1_000
+  const timers = new Set<ReturnType<typeof setTimeout>>()
+  let restoring: Promise<void> | undefined
+  const restore = () => {
+    if (restoring) return restoring
+    restoring = (async () => {
+      if (toast && show) toast.show = show
+      if (descriptor) Object.defineProperty(Interrupt, "onForegroundTask", descriptor)
+      if (timersPatched) {
+        Date.now = original.date
+        globalThis.setTimeout = original.timeout
+        globalThis.clearTimeout = original.clear
+      }
+      for (const timer of timers) original.clear(timer)
+      timers.clear()
+      for (const dispose of [...disposers]) dispose()
+      const renderer = setup?.renderer
+      if (renderer && !renderer.isDestroyed) {
+        renderer.stop()
+        await renderer.idle()
+      }
+      engine.detach()
+      if (renderer && !renderer.isDestroyed) {
+        renderer.destroy()
+        await destroyed.promise
+      }
+      if (!syntaxDestroyed) {
+        syntaxDestroyed = true
+        syntax.destroy()
+      }
+      currentSyntax = undefined
+      if (original.env) Object.defineProperty(process.env, "OTUI_USE_CONSOLE", original.env)
+      if (!original.env) Reflect.deleteProperty(process.env, "OTUI_USE_CONSOLE")
+      if (original.hasRaf) globalThis.requestAnimationFrame = original.raf
+      if (!original.hasRaf) Reflect.deleteProperty(globalThis, "requestAnimationFrame")
+      if (original.hasCaf) globalThis.cancelAnimationFrame = original.caf
+      if (!original.hasCaf) Reflect.deleteProperty(globalThis, "cancelAnimationFrame")
+      if (!original.hasWindow) Reflect.deleteProperty(host, "window")
+      if (original.hasWindow) {
+        host.window = original.window
+        if (host.window && original.hasWindowRaf) host.window.requestAnimationFrame = original.windowRaf
+        if (host.window && !original.hasWindowRaf) Reflect.deleteProperty(host.window, "requestAnimationFrame")
+      }
+      for (const listener of process.listeners("SIGHUP")) {
+        if (!original.sighup.has(listener)) process.removeListener("SIGHUP", listener)
+      }
+      stdin.destroy()
+      stdout.destroy()
+      listeners.clear()
+      input.onRestore?.({
+        listeners: listeners.size,
+        pending,
+        rendererDestroyed: renderer?.isDestroyed ?? true,
+        toastRestored: !toast || !show || toast.show === show,
+      })
+    })()
+    return restoring
+  }
   const register = (sessionID: SessionID) => {
     const dispose = ForegroundTask.register(sessionID, { interrupt() {} })
     const state = { done: false }
@@ -238,172 +318,235 @@ export async function mountPromptControl(input: Input) {
     disposers.add(tracked)
     return tracked
   }
-  if (input.runtimeOwnership) register(input.childID)
-  const modules = await Promise.all([
-    import("../../src/cli/cmd/tui/context/args"),
-    import("../../src/cli/cmd/tui/context/exit"),
-    import("../../src/cli/cmd/tui/context/kv"),
-    import("../../src/cli/cmd/tui/ui/toast"),
-    import("../../src/cli/cmd/tui/context/route"),
-    import("../../src/cli/cmd/tui/context/tui-config"),
-    import("../../src/cli/cmd/tui/context/sdk"),
-    import("../../src/cli/cmd/tui/context/sync"),
-    import("../../src/cli/cmd/tui/context/keybind"),
-    import("../../src/cli/cmd/tui/component/prompt/stash"),
-    import("../../src/cli/cmd/tui/ui/dialog"),
-    import("../../src/cli/cmd/tui/component/dialog-command"),
-    import("../../src/cli/cmd/tui/component/prompt/frecency"),
-    import("../../src/cli/cmd/tui/component/prompt/history"),
-    import("../../src/cli/cmd/tui/component/prompt"),
-  ])
-  const ArgsProvider = modules[0].ArgsProvider
-  const ExitProvider = modules[1].ExitProvider
-  const KVProvider = modules[2].KVProvider
-  const ToastProvider = modules[3].ToastProvider
-  const RouteProvider = modules[4].RouteProvider
-  const TuiConfigProvider = modules[5].TuiConfigProvider
-  const SDKProvider = modules[6].SDKProvider
-  const SyncProvider = modules[7].SyncProvider
-  const useSync = modules[7].useSync
-  const KeybindProvider = modules[8].KeybindProvider
-  const PromptStashProvider = modules[9].PromptStashProvider
-  const DialogProvider = modules[10].DialogProvider
-  const CommandProvider = modules[11].CommandProvider
-  const useCommandDialog = modules[11].useCommandDialog
-  const FrecencyProvider = modules[12].FrecencyProvider
-  const PromptHistoryProvider = modules[13].PromptHistoryProvider
-  const Prompt = modules[14].Prompt
+  const mount = async () => {
+    if (input.runtimeOwnership) register(input.childID)
+    const modules = await Promise.all([
+      import("../../src/cli/cmd/tui/context/args"),
+      import("../../src/cli/cmd/tui/context/exit"),
+      import("../../src/cli/cmd/tui/context/kv"),
+      import("../../src/cli/cmd/tui/ui/toast"),
+      import("../../src/cli/cmd/tui/context/route"),
+      import("../../src/cli/cmd/tui/context/tui-config"),
+      import("../../src/cli/cmd/tui/context/sdk"),
+      import("../../src/cli/cmd/tui/context/sync"),
+      import("../../src/cli/cmd/tui/context/keybind"),
+      import("../../src/cli/cmd/tui/component/prompt/stash"),
+      import("../../src/cli/cmd/tui/ui/dialog"),
+      import("../../src/cli/cmd/tui/component/dialog-command"),
+      import("../../src/cli/cmd/tui/component/prompt/frecency"),
+      import("../../src/cli/cmd/tui/component/prompt/history"),
+      import("../../src/cli/cmd/tui/component/prompt"),
+    ])
+    const ArgsProvider = modules[0].ArgsProvider
+    const ExitProvider = modules[1].ExitProvider
+    const KVProvider = modules[2].KVProvider
+    const ToastProvider = modules[3].ToastProvider
+    const useToast = modules[3].useToast
+    const RouteProvider = modules[4].RouteProvider
+    const TuiConfigProvider = modules[5].TuiConfigProvider
+    const SDKProvider = modules[6].SDKProvider
+    const SyncProvider = modules[7].SyncProvider
+    const useSync = modules[7].useSync
+    const KeybindProvider = modules[8].KeybindProvider
+    const PromptStashProvider = modules[9].PromptStashProvider
+    const DialogProvider = modules[10].DialogProvider
+    const CommandProvider = modules[11].CommandProvider
+    const useCommandDialog = modules[11].useCommandDialog
+    const FrecencyProvider = modules[12].FrecencyProvider
+    const PromptHistoryProvider = modules[13].PromptHistoryProvider
+    const Prompt = modules[14].Prompt
 
-  function Capture(props: ParentProps) {
-    const command = useCommandDialog()
-    const sync = useSync()
-    trigger = command.trigger
-    syncStatus = () => sync.data.session_status[input.childID]?.type
-    syncParent = () => sync.session.sync(input.parentID)
-    syncEvidence = () => {
-      const messages = sync.data.message[input.parentID] ?? []
-      const parts = messages.flatMap((item) => sync.data.part[item.id] ?? [])
-      return {
-        childParentID: sync.session.get(input.childID)?.parentID,
-        status: sync.data.session_status[input.childID]?.type,
-        messages: messages.map((item) => item.id),
-        parts: parts.filter((item) => item.type === "tool"),
+    function Capture(props: ParentProps) {
+      const command = useCommandDialog()
+      const sync = useSync()
+      toast = useToast()
+      show = toast.show
+      onCleanup(() => {
+        void restore()
+      })
+      trigger = command.trigger
+      syncStatus = () => sync.data.session_status[input.childID]?.type
+      syncParent = () => sync.session.sync(input.parentID)
+      syncEvidence = () => {
+        const messages = sync.data.message[input.parentID] ?? []
+        const parts = messages.flatMap((item) => sync.data.part[item.id] ?? [])
+        return {
+          childParentID: sync.session.get(input.childID)?.parentID,
+          status: sync.data.session_status[input.childID]?.type,
+          messages: messages.map((item) => item.id),
+          parts: parts.filter((item) => item.type === "tool"),
+        }
       }
+      const register = command.register
+      command.register = (cb) =>
+        register(() =>
+          cb().map((option) => {
+            if (option.value !== "session.interrupt") return option
+            commandState.registered = true
+            const onSelect = option.onSelect
+            const wrapped = Object.create(Object.getPrototypeOf(option), Object.getOwnPropertyDescriptors(option)) as typeof option
+            Object.defineProperty(wrapped, "enabled", {
+              enumerable: true,
+              configurable: true,
+              get() {
+                const enabled = option.enabled !== false
+                commandState.enabled = enabled
+                commandState.status = syncStatus()
+                return enabled
+              },
+            })
+            Object.defineProperty(wrapped, "onSelect", {
+              enumerable: true,
+              configurable: true,
+              value(dialog: Parameters<NonNullable<typeof onSelect>>[0]) {
+                commandState.selected += 1
+                return onSelect?.(dialog)
+              },
+            })
+            return wrapped
+          }),
+        )
+      onMount(() => commandReady.resolve(command))
+      return props.children
     }
-    const register = command.register
-    command.register = (cb) =>
-      register(() =>
-        cb().map((option) => {
-          if (option.value !== "session.interrupt") return option
-          commandState.registered = true
-          const onSelect = option.onSelect
-          const wrapped = Object.create(Object.getPrototypeOf(option), Object.getOwnPropertyDescriptors(option)) as typeof option
-          Object.defineProperty(wrapped, "enabled", {
-            enumerable: true,
-            configurable: true,
-            get() {
-              const enabled = option.enabled !== false
-              commandState.enabled = enabled
-              commandState.status = syncStatus()
-              return enabled
-            },
-          })
-          Object.defineProperty(wrapped, "onSelect", {
-            enumerable: true,
-            configurable: true,
-            value(dialog: Parameters<NonNullable<typeof onSelect>>[0]) {
-              commandState.selected += 1
-              return onSelect?.(dialog)
-            },
-          })
-          return wrapped
-        }),
-      )
-    onMount(() => commandReady.resolve(command))
-    return props.children
+
+    setup = await testRender(
+      () => (
+        <ArgsProvider continue={true}>
+          <ExitProvider onBeforeExit={async () => {}} onExit={async () => {}}>
+            <KVProvider>
+              <ToastProvider>
+                <RouteProvider>
+                  <TuiConfigProvider config={{ keybinds: { session_interrupt: "escape" } }}>
+                    <SDKProvider
+                      url="http://kilo.test"
+                      directory={process.cwd()}
+                      fetch={transport as unknown as typeof fetch}
+                      events={events}
+                    >
+                      <SyncProvider>
+                        <KeybindProvider>
+                          <PromptStashProvider>
+                            <DialogProvider>
+                              <CommandProvider>
+                                <Capture>
+                                  <FrecencyProvider>
+                                    <PromptHistoryProvider>
+                                      <Prompt sessionID={input.childID} visible={false} showPlaceholder={false} />
+                                    </PromptHistoryProvider>
+                                  </FrecencyProvider>
+                                </Capture>
+                              </CommandProvider>
+                            </DialogProvider>
+                          </PromptStashProvider>
+                        </KeybindProvider>
+                      </SyncProvider>
+                    </SDKProvider>
+                  </TuiConfigProvider>
+                </RouteProvider>
+              </ToastProvider>
+            </KVProvider>
+          </ExitProvider>
+        </ArgsProvider>
+      ),
+      {
+        width: 80,
+        height: 24,
+        stdin: stdin as unknown as NodeJS.ReadStream,
+        stdout: stdout as unknown as NodeJS.WriteStream,
+        useThread: false,
+        exitOnCtrlC: false,
+        exitSignals: [],
+        useMouse: false,
+        useAlternateScreen: false,
+        useConsole: false,
+        memorySnapshotInterval: 0,
+        onDestroy: destroyed.resolve,
+      },
+    )
+    await commandReady.promise
+    if (!toast || !show) throw new Error("toast instrumentation is unavailable")
+    const context = toast
+    const notify = show
+    const originalReducer = Object.getOwnPropertyDescriptor(Interrupt, "onForegroundTask")
+    if (!originalReducer) throw new Error("interrupt lifecycle reducer is unavailable")
+    descriptor = originalReducer
+    const reduce = Interrupt.onForegroundTask
+    context.show = (options) => {
+      toasts.push(options)
+      notify(options)
+    }
+    Object.defineProperty(Interrupt, "onForegroundTask", {
+      ...originalReducer,
+      value: (...args: Parameters<typeof reduce>) => {
+        const result = reduce(...args)
+        lifecycle.push(result)
+        return result
+      },
+    })
+    if (input.failure) throw input.failure
+    await syncParent()
+    await setup.renderOnce()
+
+    timersPatched = true
+    Date.now = () => now
+    globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+      const handle = original.timeout(...args)
+      timers.add(handle)
+      return handle
+    }) as typeof setTimeout
+    globalThis.clearTimeout = ((handle: ReturnType<typeof setTimeout>) => {
+      timers.delete(handle)
+      return original.clear(handle)
+    }) as typeof clearTimeout
+  }
+  try {
+    await mount()
+  } catch (err) {
+    try {
+      await restore()
+    } catch (cleanup) {
+      if (err instanceof Error && err.cause === undefined) err.cause = cleanup
+    }
+    throw err
+  }
+  const ready = setup
+  if (!ready) {
+    const err = new Error("test renderer is unavailable")
+    await restore()
+    throw err
   }
 
-  const setup = await testRender(
-    () => (
-      <ArgsProvider continue={true}>
-        <ExitProvider onBeforeExit={async () => {}} onExit={async () => {}}>
-          <KVProvider>
-            <ToastProvider>
-              <RouteProvider>
-                <TuiConfigProvider config={{ keybinds: { session_interrupt: "escape" } }}>
-                  <SDKProvider
-                    url="http://kilo.test"
-                    directory={process.cwd()}
-                    fetch={transport as unknown as typeof fetch}
-                    events={events}
-                  >
-                    <SyncProvider>
-                      <KeybindProvider>
-                        <PromptStashProvider>
-                          <DialogProvider>
-                            <CommandProvider>
-                              <Capture>
-                                <FrecencyProvider>
-                                  <PromptHistoryProvider>
-                                    <Prompt sessionID={input.childID} visible={false} showPlaceholder={false} />
-                                  </PromptHistoryProvider>
-                                </FrecencyProvider>
-                              </Capture>
-                            </CommandProvider>
-                          </DialogProvider>
-                        </PromptStashProvider>
-                      </KeybindProvider>
-                    </SyncProvider>
-                  </SDKProvider>
-                </TuiConfigProvider>
-              </RouteProvider>
-            </ToastProvider>
-          </KVProvider>
-        </ExitProvider>
-      </ArgsProvider>
-    ),
-    {
-      width: 80,
-      height: 24,
-      stdin: stdin as unknown as NodeJS.ReadStream,
-      stdout: stdout as unknown as NodeJS.WriteStream,
-      useThread: false,
-      exitOnCtrlC: false,
-      exitSignals: [],
-      useMouse: false,
-      useAlternateScreen: false,
-      useConsole: false,
-      memorySnapshotInterval: 0,
-      onDestroy: destroyed.resolve,
-    },
-  )
-  await commandReady.promise
-  await syncParent()
-  await setup.renderOnce()
-
-  let now = 1_000
-  const timers = new Set<ReturnType<typeof setTimeout>>()
-  Date.now = () => now
-  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
-    const handle = original.timeout(...args)
-    timers.add(handle)
-    return handle
-  }) as typeof setTimeout
-  globalThis.clearTimeout = ((handle: ReturnType<typeof setTimeout>) => {
-    timers.delete(handle)
-    return original.clear(handle)
-  }) as typeof clearTimeout
-
-  let disposed = false
   return {
-    renderer: setup.renderer,
-    mockInput: setup.mockInput,
-    renderOnce: setup.renderOnce,
+    renderer: ready.renderer,
+    mockInput: ready.mockInput,
+    renderOnce: ready.renderOnce,
     requests,
     abortSessionIDs,
     commandState,
     syncStatus: () => syncStatus(),
     syncEvidence: () => syncEvidence(),
+    toasts,
+    lifecycle: () => lifecycle,
+    setMetadata(active: boolean) {
+      if (active) {
+        events.emit({
+          type: "message.updated",
+          properties: { sessionID: input.parentID, info: message },
+        })
+        now += 20
+        events.emit({
+          type: "message.part.updated",
+          properties: { sessionID: input.parentID, part, time: now },
+        })
+        return
+      }
+      now += 20
+      events.emit({
+        type: "message.part.removed",
+        properties: { sessionID: input.parentID, messageID, partID: part.id },
+      })
+    },
     trigger(name: string) {
       trigger(name)
     },
@@ -416,40 +559,19 @@ export async function mountPromptControl(input: Input) {
     },
     pending: () => pending,
     listeners: () => listeners.size,
+    frame: {
+      original: { raf: original.hasRaf, caf: original.hasCaf },
+      current: () => ({
+        raf: Object.prototype.hasOwnProperty.call(globalThis, "requestAnimationFrame"),
+        caf: Object.prototype.hasOwnProperty.call(globalThis, "cancelAnimationFrame"),
+      }),
+    },
     advance(ms: number) {
       now += ms
     },
     async dispose() {
-      if (disposed) return
-      disposed = true
-      Date.now = original.date
-      globalThis.setTimeout = original.timeout
-      globalThis.clearTimeout = original.clear
-      for (const timer of timers) original.clear(timer)
-      for (const dispose of [...disposers]) dispose()
-      setup.renderer.stop()
-      await setup.renderer.idle()
-      engine.detach()
-      setup.renderer.destroy()
-      await destroyed.promise
-      syntax.destroy()
-      currentSyntax = undefined
-      if (original.env === undefined) Reflect.deleteProperty(process.env, "OTUI_USE_CONSOLE")
-      if (original.env !== undefined) process.env.OTUI_USE_CONSOLE = original.env
-      globalThis.requestAnimationFrame = original.raf
-      globalThis.cancelAnimationFrame = original.caf
-      if (!original.hasWindow) Reflect.deleteProperty(host, "window")
-      if (original.hasWindow) {
-        host.window = original.window
-        if (host.window && original.hasWindowRaf) host.window.requestAnimationFrame = original.windowRaf
-        if (host.window && !original.hasWindowRaf) Reflect.deleteProperty(host.window, "requestAnimationFrame")
-      }
-      for (const listener of process.listeners("SIGHUP")) {
-        if (!original.sighup.has(listener)) process.removeListener("SIGHUP", listener)
-      }
-      stdin.destroy()
-      stdout.destroy()
-      if (!setup.renderer.isDestroyed) throw new Error("renderer was not destroyed")
+      await restore()
+      if (!ready.renderer.isDestroyed) throw new Error("renderer was not destroyed")
       if (ForegroundTask.has(input.childID)) throw new Error("child foreground registration remains")
       if (ForegroundTask.has(input.siblingID)) throw new Error("sibling foreground registration remains")
       if (listeners.size !== 0) throw new Error(`event listeners remain: ${listeners.size}`)
