@@ -9,7 +9,7 @@ import { EmptyBorder, SplitBorder } from "@tui/component/border"
 import { useSDK } from "@tui/context/sdk"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
-import { MessageID, PartID } from "@/session/schema"
+import { MessageID, PartID, SessionID } from "@/session/schema"
 import { createStore, produce } from "solid-js/store"
 import { useKeybind } from "@tui/context/keybind"
 import { usePromptHistory, type PromptInfo } from "./history"
@@ -101,8 +101,9 @@ export function Prompt(props: PromptProps) {
       setRuntimeForegroundTaskActive(false)
       return
     }
-    setRuntimeForegroundTaskActive(ForegroundTask.has(id))
-    const unsubscribe = ForegroundTask.subscribe(id, setRuntimeForegroundTaskActive)
+    const sessionID = SessionID.make(id)
+    setRuntimeForegroundTaskActive(ForegroundTask.has(sessionID))
+    const unsubscribe = ForegroundTask.subscribe(sessionID, setRuntimeForegroundTaskActive)
     onCleanup(unsubscribe)
   })
   const [interrupt, setInterrupt] = createSignal<Interrupt.State>({

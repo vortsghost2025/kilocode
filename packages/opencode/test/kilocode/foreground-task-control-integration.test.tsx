@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test"
+import { SessionID } from "../../src/session/schema"
 import { mountPromptControl } from "../fixture/tui-control-harness"
 
-const parentID = "ses_parent"
-const childID = "ses_child"
-const siblingID = "ses_sibling"
+const parentID = SessionID.make("ses_parent")
+const childID = SessionID.make("ses_child")
+const siblingID = SessionID.make("ses_sibling")
 
 async function run(input: { matchingMetadata: boolean; runtimeOwnership: boolean }) {
   const harness = await mountPromptControl({ parentID, childID, siblingID, ...input })

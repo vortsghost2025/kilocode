@@ -1,10 +1,11 @@
 import { mock } from "bun:test"
 import { engine, RGBA, SyntaxStyle } from "@opentui/core"
 import { testRender } from "@opentui/solid"
-import type { Event, Session } from "@kilocode/sdk/v2"
+import type { Event, Session, ToolPart } from "@kilocode/sdk/v2"
 import { PassThrough, Readable } from "node:stream"
 import { onMount, type ParentProps } from "solid-js"
 import { ForegroundTask } from "../../src/kilocode/foreground-task"
+import { SessionID } from "../../src/session/schema"
 
 const color = RGBA.fromInts(220, 220, 220)
 const passthrough = (props: ParentProps) => props.children
@@ -49,9 +50,9 @@ mock.module("@tui/context/local", () => ({
 }))
 
 type Input = {
-  parentID: string
-  childID: string
-  siblingID: string
+  parentID: SessionID
+  childID: SessionID
+  siblingID: SessionID
   matchingMetadata: boolean
   runtimeOwnership: boolean
 }
@@ -60,6 +61,13 @@ type Listener = (event: Event) => void
 
 type Host = typeof globalThis & {
   window?: { requestAnimationFrame?: typeof requestAnimationFrame }
+}
+
+type Evidence = {
+  childParentID: string | undefined
+  status: string | undefined
+  messages: string[]
+  parts: ToolPart[]
 }
 
 function session(id: string, parentID?: string): Session {
@@ -119,7 +127,7 @@ export async function mountPromptControl(input: Input) {
     cost: 0,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   }
-  const part = {
+  const part: ToolPart = {
     id: "part_task",
     sessionID: input.parentID,
     messageID,
@@ -186,7 +194,7 @@ export async function mountPromptControl(input: Input) {
     throw new Error(`Unexpected SDK request: ${method} ${pathname}`)
   }
   let pending = 0
-  const transport: typeof fetch = async (value, init) => {
+  const transport = async (value: string | URL | Request, init?: RequestInit) => {
     pending += 1
     try {
       const request = new Request(value, init)
@@ -210,15 +218,15 @@ export async function mountPromptControl(input: Input) {
   }
   let syncStatus = () => undefined as string | undefined
   let syncParent = async () => {}
-  let syncEvidence = () => ({
-    childParentID: undefined as string | undefined,
-    status: undefined as string | undefined,
-    messages: [] as string[],
-    parts: [] as typeof part[],
+  let syncEvidence: () => Evidence = () => ({
+    childParentID: undefined,
+    status: undefined,
+    messages: [],
+    parts: [],
   })
   let trigger = (_name: string) => {}
   const disposers = new Set<() => void>()
-  const register = (sessionID: string) => {
+  const register = (sessionID: SessionID) => {
     const dispose = ForegroundTask.register(sessionID, { interrupt() {} })
     const state = { done: false }
     const tracked = () => {
@@ -323,7 +331,12 @@ export async function mountPromptControl(input: Input) {
             <ToastProvider>
               <RouteProvider>
                 <TuiConfigProvider config={{ keybinds: { session_interrupt: "escape" } }}>
-                  <SDKProvider url="http://kilo.test" directory={process.cwd()} fetch={transport} events={events}>
+                  <SDKProvider
+                    url="http://kilo.test"
+                    directory={process.cwd()}
+                    fetch={transport as unknown as typeof fetch}
+                    events={events}
+                  >
                     <SyncProvider>
                       <KeybindProvider>
                         <PromptStashProvider>
@@ -421,15 +434,15 @@ export async function mountPromptControl(input: Input) {
       await destroyed.promise
       syntax.destroy()
       currentSyntax = undefined
-      if (original.env === undefined) delete process.env.OTUI_USE_CONSOLE
+      if (original.env === undefined) Reflect.deleteProperty(process.env, "OTUI_USE_CONSOLE")
       if (original.env !== undefined) process.env.OTUI_USE_CONSOLE = original.env
       globalThis.requestAnimationFrame = original.raf
       globalThis.cancelAnimationFrame = original.caf
-      if (!original.hasWindow) delete host.window
+      if (!original.hasWindow) Reflect.deleteProperty(host, "window")
       if (original.hasWindow) {
         host.window = original.window
         if (host.window && original.hasWindowRaf) host.window.requestAnimationFrame = original.windowRaf
-        if (host.window && !original.hasWindowRaf) delete host.window.requestAnimationFrame
+        if (host.window && !original.hasWindowRaf) Reflect.deleteProperty(host.window, "requestAnimationFrame")
       }
       for (const listener of process.listeners("SIGHUP")) {
         if (!original.sighup.has(listener)) process.removeListener("SIGHUP", listener)
