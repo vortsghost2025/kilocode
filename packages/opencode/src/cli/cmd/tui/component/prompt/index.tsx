@@ -24,6 +24,7 @@ import { useExit } from "../../context/exit"
 import { Clipboard } from "../../util/clipboard"
 import type { AssistantMessage, FilePart } from "@kilocode/sdk/v2"
 import { Interrupt } from "@/kilocode/interrupt" // kilocode_change
+import { ForegroundTask } from "@/kilocode/foreground-task" // kilocode_change
 import { TuiEvent } from "../../event"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
@@ -92,6 +93,17 @@ export function Prompt(props: PromptProps) {
     const id = props.sessionID
     if (!id) return false
     return props.visible === false && !!sync.session.get(id)?.parentID
+  })
+  const [runtimeForegroundTaskActive, setRuntimeForegroundTaskActive] = createSignal(false)
+  createEffect(() => {
+    const id = props.sessionID
+    if (!id) {
+      setRuntimeForegroundTaskActive(false)
+      return
+    }
+    setRuntimeForegroundTaskActive(ForegroundTask.has(id))
+    const unsubscribe = ForegroundTask.subscribe(id, setRuntimeForegroundTaskActive)
+    onCleanup(unsubscribe)
   })
   const [interrupt, setInterrupt] = createSignal<Interrupt.State>({
     pending: false,
@@ -309,7 +321,10 @@ export function Prompt(props: PromptProps) {
         category: "Session",
         hidden: true,
         // kilocode_change start - child-aware interrupt handler with normal-session error support
-        enabled: Interrupt.available(statusType(), foregroundTaskActive()),
+        enabled: Interrupt.available(
+          statusType(),
+          runtimeForegroundTaskActive() || foregroundTaskActive(),
+        ),
           onSelect: (dialog) => {
           if (autocomplete.visible) return
           if (!input.focused && !child()) return

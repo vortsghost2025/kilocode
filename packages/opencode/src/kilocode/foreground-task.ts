@@ -11,7 +11,17 @@ export namespace ForegroundTask {
     handle: Handle
   }
 
+  export type Listener = (active: boolean) => void
+
   const entries = new Map<SessionID, Entry>()
+  const listeners = new Map<SessionID, Set<Listener>>()
+
+  function notify(sessionID: SessionID) {
+    const set = listeners.get(sessionID)
+    if (!set) return
+    const active = entries.has(sessionID)
+    for (const listener of [...set]) listener(active)
+  }
 
   export function register(sessionID: SessionID, handle: Handle) {
     if (entries.has(sessionID)) {
@@ -24,11 +34,13 @@ export namespace ForegroundTask {
     }
 
     entries.set(sessionID, entry)
+    notify(sessionID)
 
     return () => {
       const current = entries.get(sessionID)
       if (current?.token !== entry.token) return
       entries.delete(sessionID)
+      notify(sessionID)
     }
   }
 
@@ -40,8 +52,24 @@ export namespace ForegroundTask {
     // A resumed task using the same task_id may register a new entry while
     // the previous child Promise is still finishing.
     entries.delete(sessionID)
+    notify(sessionID)
     entry.handle.interrupt()
     return true
+  }
+
+  export function subscribe(sessionID: SessionID, listener: Listener) {
+    const set = listeners.get(sessionID) ?? new Set<Listener>()
+    listeners.set(sessionID, set)
+    set.add(listener)
+    listener(entries.has(sessionID))
+    const state = { done: false }
+
+    return () => {
+      if (state.done) return
+      state.done = true
+      set.delete(listener)
+      if (set.size === 0) listeners.delete(sessionID)
+    }
   }
 
   export function has(sessionID: SessionID) {
