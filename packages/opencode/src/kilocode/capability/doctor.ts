@@ -84,6 +84,68 @@ export namespace CapabilityDoctor {
 
   export type Report = z.infer<typeof Report>
 
+  export const RegistryManifest = z
+    .object({
+      source: z.string(),
+      agentID: z.string(),
+      risk: CapabilityManifest.Risk,
+      classification: CapabilityManifest.Classification,
+      providerID: z.string(),
+      modelID: z.string(),
+      credentialRef: CapabilityManifest.CredentialRef,
+      skills: z.array(z.string()),
+      mcpServers: z.array(z.string()),
+      plugins: z.array(z.string()),
+      builtins: z.array(z.string()),
+      selected: z.boolean(),
+    })
+    .strict()
+  export type RegistryManifest = z.infer<typeof RegistryManifest>
+
+  export const RegistryInput = z
+    .object({
+      root: z.string(),
+      directory: z.string(),
+      files: z.array(z.string()),
+      validCount: z.number().int().nonnegative(),
+      invalidPaths: z.array(z.string()),
+      entries: z.array(RegistryManifest),
+      duplicateAgentIDs: z.array(z.string()),
+      selected: z.boolean(),
+    })
+    .strict()
+  export type RegistryInput = z.infer<typeof RegistryInput>
+
+  export const RegistryReport = z
+    .object({
+      projectRoot: z.string(),
+      manifestDirectory: z.string(),
+      discoveredManifestFiles: z.array(z.string()),
+      validManifestCount: z.number().int().nonnegative(),
+      invalidManifestPaths: z.array(z.string()),
+      agentIDs: z.array(z.string()),
+      manifests: z.array(RegistryManifest),
+      duplicateAgentIDs: z.array(z.string()),
+      selected: z.boolean(),
+    })
+    .strict()
+  export type RegistryReport = z.infer<typeof RegistryReport>
+
+  export function inspectRegistry(value: unknown): RegistryReport {
+    const input = RegistryInput.parse(value)
+    return RegistryReport.parse({
+      projectRoot: input.root,
+      manifestDirectory: input.directory,
+      discoveredManifestFiles: input.files,
+      validManifestCount: input.validCount,
+      invalidManifestPaths: input.invalidPaths,
+      agentIDs: input.entries.map((entry) => entry.agentID),
+      manifests: input.entries,
+      duplicateAgentIDs: input.duplicateAgentIDs,
+      selected: input.selected,
+    })
+  }
+
   const sensitive = /(api.?key|token|secret|password|authorization|client.?secret|private.?key)/i
   const secret = /^(sk-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|Bearer\s+\S+)/
   const env = /^\{env:[A-Z_][A-Z0-9_]{0,63}\}$/
