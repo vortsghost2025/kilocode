@@ -1,5 +1,5 @@
 // kilocode_change - new file
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test as base } from "bun:test"
 import { Identifier } from "../../src/id/id"
 import { BackgroundSubagentControl } from "../../src/kilocode/background-subagent-control"
 import { BackgroundSubagentStart } from "../../src/kilocode/background-subagent-start"
@@ -15,6 +15,13 @@ import { Session } from "../../src/session"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { tmpdir } from "../fixture/fixture"
+
+function test(name: string, fn: () => void | Promise<void>) {
+  return base(name, async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({ directory: tmp.path, fn })
+  })
+}
 
 const startModule = BackgroundSubagentStart as unknown as {
   start: typeof BackgroundSubagentStart.start
@@ -86,7 +93,6 @@ function makeClaim(overrides: Partial<BackgroundTask.Claim> & { taskID: string }
 
 afterEach(async () => {
   BackgroundSubagentControl.resetForTests()
-  BackgroundTask.resetForTests()
   BackgroundTaskRuntime.resetForTests()
   await Instance.disposeAll()
 })

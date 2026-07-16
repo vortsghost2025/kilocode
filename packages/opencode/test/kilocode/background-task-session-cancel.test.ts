@@ -1,9 +1,18 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test as base } from "bun:test"
+import { Instance } from "../../src/project/instance"
 import { Identifier } from "../../src/id/id"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { SessionPrompt } from "../../src/session/prompt"
 import { BackgroundTask } from "../../src/kilocode/background-task"
 import { BackgroundTaskSessionCancel } from "../../src/kilocode/background-task-session-cancel"
+import { tmpdir } from "../fixture/fixture"
+
+function test(name: string, fn: () => void | Promise<void>) {
+  return base(name, async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({ directory: tmp.path, fn })
+  })
+}
 
 function sid() {
   return SessionID.make(Identifier.ascending("session"))
@@ -13,9 +22,7 @@ function mid() {
   return MessageID.make(Identifier.ascending("message"))
 }
 
-afterEach(() => {
-  BackgroundTask.resetForTests()
-})
+afterEach(() => Instance.disposeAll())
 
 describe("BackgroundTaskSessionCancel", () => {
   test("queued task cancellation calls SessionPrompt.cancel with exact childSessionID", async () => {

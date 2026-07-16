@@ -167,7 +167,6 @@ async function withPrompt<T>(
 }
 
 afterEach(async () => {
-  BackgroundTask.resetForTests()
   BackgroundTaskRuntime.resetForTests()
   await Instance.disposeAll()
 })

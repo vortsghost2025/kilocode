@@ -1,8 +1,17 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test as base } from "bun:test"
+import { Instance } from "../../src/project/instance"
 import { Identifier } from "../../src/id/id"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { BackgroundTask } from "../../src/kilocode/background-task"
 import { BackgroundTaskCompletion } from "../../src/kilocode/background-task-completion"
+import { tmpdir } from "../fixture/fixture"
+
+function test(name: string, fn: () => void | Promise<void>) {
+  return base(name, async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({ directory: tmp.path, fn })
+  })
+}
 
 function sid() {
   return SessionID.make(Identifier.ascending("session"))
@@ -39,7 +48,7 @@ function createRunning() {
   return created
 }
 
-afterEach(() => BackgroundTask.resetForTests())
+afterEach(() => Instance.disposeAll())
 
 describe("BackgroundTaskCompletion", () => {
   test("pending completion leaves a running task running", async () => {

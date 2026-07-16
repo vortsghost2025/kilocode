@@ -1,14 +1,11 @@
 import { randomUUID } from "crypto"
 import type { MessageID, SessionID } from "@/session/schema"
+import { SubagentTaskControl } from "./subagent-task-control"
 
 export namespace BackgroundTask {
-  export type TaskID = string
+  export type TaskID = SubagentTaskControl.TaskID
   export type Status = "queued" | "running" | "completed" | "failed" | "cancelled"
-
-  export interface Failure {
-    name?: string
-    message: string
-  }
+  export type Failure = SubagentTaskControl.Failure
 
   export interface Info {
     taskID: TaskID
@@ -24,15 +21,7 @@ export namespace BackgroundTask {
     error: Failure | undefined
   }
 
-  interface Entry extends Info {
-    ownerToken: symbol
-  }
-
-  export interface Claim {
-    taskID: TaskID
-    generation: number
-    ownerToken: symbol
-  }
+  export type Claim = SubagentTaskControl.CompatibilityClaim
 
   export interface CreateInput {
     taskID?: TaskID
@@ -68,185 +57,83 @@ export namespace BackgroundTask {
 
   export interface CancelledInput extends Claim, Time {}
 
-  const entries = new Map<TaskID, Entry>()
+  function status(execution: SubagentTaskControl.Execution): Status {
+    if (execution === "completed") return "completed"
+    if (execution === "failed") return "failed"
+    if (execution === "cancelled") return "cancelled"
+    if (execution === "running") return "running"
+    return "queued"
+  }
 
-  const live = (status: Status) => status === "queued" || status === "running"
-
-  const copyFailure = (input: Failure | undefined): Failure | undefined => {
-    if (!input) return undefined
+  function view(input: SubagentTaskControl.Info): Info {
+    if (!input.child) throw new Error(`Background task child unavailable: ${input.ref.taskID}`)
+    const result = input.result
     return {
-      ...(input.name ? { name: input.name } : {}),
-      message: input.message,
+      taskID: input.ref.taskID,
+      parentSessionID: input.parentSessionID,
+      childSessionID: input.child.sessionID,
+      childUserMessageID: input.child.userMessageID,
+      generation: input.ref.generation,
+      status: status(input.execution),
+      createdAt: input.createdAt,
+      startedAt: input.startedAt,
+      completedAt: input.terminalAt,
+      resultMessageID: result?.type === "success" ? result.resultMessageID : undefined,
+      error: result?.type === "failure" ? { ...result.error } : undefined,
     }
   }
 
-  const view = (entry: Entry): Info => ({
-    taskID: entry.taskID,
-    parentSessionID: entry.parentSessionID,
-    childSessionID: entry.childSessionID,
-    childUserMessageID: entry.childUserMessageID,
-    generation: entry.generation,
-    status: entry.status,
-    createdAt: entry.createdAt,
-    startedAt: entry.startedAt,
-    completedAt: entry.completedAt,
-    resultMessageID: entry.resultMessageID,
-    error: copyFailure(entry.error),
-  })
-
-  const result = (applied: boolean, entry?: Entry): TransitionResult => ({
-    applied,
-    info: entry ? view(entry) : undefined,
-  })
-
-  const makeID = () => `bg_${randomUUID()}`
-
-  const owns = (entry: Entry, claim: Claim) =>
-    entry.ownerToken === claim.ownerToken && entry.generation === claim.generation
-
-  const current = (taskID: TaskID) => entries.get(taskID)
-
-  const object = (input: unknown): input is Record<string, unknown> => typeof input === "object" && input !== null
-
-  function failure(input: unknown): Failure {
-    if (input instanceof Error) {
-      return {
-        name: input.name,
-        message: input.message,
-      }
-    }
-
-    if (object(input)) {
-      const message = typeof input.message === "string" ? input.message : String(input)
-      const name = typeof input.name === "string" ? input.name : undefined
-      return {
-        ...(name ? { name } : {}),
-        message,
-      }
-    }
-
+  function outcome(input: SubagentTaskControl.TransitionResult): TransitionResult {
     return {
-      message: String(input),
+      applied: input.applied,
+      info: input.info ? view(input.info) : undefined,
     }
-  }
-
-  function transition<T extends Claim & Time>(
-    input: T,
-    allow: (status: Status) => boolean,
-    apply: (entry: Entry, next: T) => void,
-  ): TransitionResult {
-    const entry = current(input.taskID)
-    if (!entry) return result(false)
-    if (!owns(entry, input)) return result(false, entry)
-    if (!allow(entry.status)) return result(false, entry)
-    apply(entry, input)
-    return result(true, entry)
   }
 
   export function create(input: CreateInput): CreateResult {
-    const taskID = input.taskID ?? makeID()
-    if (taskID === input.childSessionID) {
-      throw new Error(`Background task handle must differ from child session: ${taskID}`)
-    }
-
-    const prev = current(taskID)
-    if (prev && live(prev.status)) {
-      throw new Error(`Background task already active: ${taskID}`)
-    }
-    if (prev && prev.parentSessionID !== input.parentSessionID) {
-      throw new Error(`Background task parent mismatch: ${taskID}`)
-    }
-
-    const entry: Entry = {
-      taskID,
+    const created = SubagentTaskControl.create({
+      taskID: input.taskID ?? `bg_${randomUUID()}`,
       parentSessionID: input.parentSessionID,
+      agentID: "background",
       childSessionID: input.childSessionID,
       childUserMessageID: input.childUserMessageID,
-      generation: prev ? prev.generation + 1 : 1,
-      ownerToken: Symbol(taskID),
-      status: "queued",
-      createdAt: input.now ?? Date.now(),
-      startedAt: undefined,
-      completedAt: undefined,
-      resultMessageID: undefined,
-      error: undefined,
-    }
-    entries.set(taskID, entry)
-
+      now: input.now,
+    })
     return {
-      info: view(entry),
-      claim: {
-        taskID: entry.taskID,
-        generation: entry.generation,
-        ownerToken: entry.ownerToken,
-      },
+      info: view(created.info),
+      claim: SubagentTaskControl.compatibilityClaim(created.handle),
     }
   }
 
   export function get(taskID: TaskID) {
-    const entry = current(taskID)
-    if (!entry) return undefined
-    return view(entry)
+    const info = SubagentTaskControl.compatibilityGet(taskID)
+    return info?.child ? view(info) : undefined
   }
 
   export function list(input?: { parentSessionID?: SessionID }) {
-    return [...entries.values()]
-      .filter((entry) => !input?.parentSessionID || entry.parentSessionID === input.parentSessionID)
+    return SubagentTaskControl.compatibilityList(input)
+      .filter((info) => info.child)
       .map(view)
   }
 
   export function transitionToRunning(input: RunningInput) {
-    return transition(
-      input,
-      (status) => status === "queued",
-      (entry, next) => {
-        entry.status = "running"
-        entry.startedAt = next.now ?? Date.now()
-      },
-    )
+    return outcome(SubagentTaskControl.compatibilityRunning(input))
   }
 
   export function transitionToCompleted(input: CompletedInput) {
-    return transition(
-      input,
-      (status) => status === "running",
-      (entry, next) => {
-        entry.status = "completed"
-        entry.completedAt = next.now ?? Date.now()
-        entry.resultMessageID = next.resultMessageID
-        entry.error = undefined
-      },
-    )
+    return outcome(SubagentTaskControl.compatibilityCompleted(input))
   }
 
   export function transitionToFailed(input: FailedInput) {
-    return transition(
-      input,
-      (status) => status === "queued" || status === "running",
-      (entry, next) => {
-        entry.status = "failed"
-        entry.completedAt = next.now ?? Date.now()
-        entry.resultMessageID = undefined
-        entry.error = failure(next.error)
-      },
-    )
+    return outcome(SubagentTaskControl.compatibilityFailed(input))
   }
 
   export function transitionToCancelled(input: CancelledInput) {
-    return transition(
-      input,
-      (status) => status === "queued" || status === "running",
-      (entry, next) => {
-        entry.status = "cancelled"
-        entry.completedAt = next.now ?? Date.now()
-        entry.resultMessageID = undefined
-        entry.error = undefined
-      },
-    )
+    return outcome(SubagentTaskControl.compatibilityCancelled(input))
   }
 
   /** @internal Exported for tests. */
   export function resetForTests() {
-    entries.clear()
+    SubagentTaskControl.resetForTests()
   }
 }

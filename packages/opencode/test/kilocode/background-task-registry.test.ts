@@ -1,7 +1,16 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test as base } from "bun:test"
+import { Instance } from "../../src/project/instance"
 import { BackgroundTask } from "../../src/kilocode/background-task"
 import { Identifier } from "../../src/id/id"
 import { MessageID, SessionID } from "../../src/session/schema"
+import { tmpdir } from "../fixture/fixture"
+
+function test(name: string, fn: () => void | Promise<void>) {
+  return base(name, async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({ directory: tmp.path, fn })
+  })
+}
 
 function sid() {
   return SessionID.make(Identifier.ascending("session"))
@@ -36,9 +45,7 @@ function run(created: BackgroundTask.CreateResult, now = 20) {
   return next
 }
 
-afterEach(() => {
-  BackgroundTask.resetForTests()
-})
+afterEach(() => Instance.disposeAll())
 
 describe("BackgroundTask registry", () => {
   test("create exposes claim separately and public snapshots do not expose ownerToken or leak mutations", () => {

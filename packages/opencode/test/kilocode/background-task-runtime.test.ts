@@ -36,10 +36,9 @@ function defer<T>(): Deferred<T> {
   return { promise, resolve: res!, reject: rej! }
 }
 
-afterEach(() => {
+afterEach(async () => {
   BackgroundTaskRuntime.resetForTests()
-  BackgroundTask.resetForTests()
-  Instance.disposeAll()
+  await Instance.disposeAll()
 })
 
 describe("BackgroundTaskRuntime", () => {

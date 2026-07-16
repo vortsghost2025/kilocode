@@ -21,10 +21,7 @@ function withInstance(directory: string, fn: () => Promise<void>) {
   return Instance.provide({ directory, fn })
 }
 
-afterEach(() => {
-  BackgroundTask.resetForTests()
-  Instance.disposeAll()
-})
+afterEach(() => Instance.disposeAll())
 
 interface Deferred<T> {
   promise: Promise<T>
