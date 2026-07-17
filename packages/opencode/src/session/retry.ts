@@ -97,13 +97,15 @@ export namespace SessionRetry {
     parse: (error: unknown) => Err
     set: (input: { attempt: number; message: string; next: number }) => Effect.Effect<void>
     // kilocode_change start
+    retry?: boolean
     limit?: number
     offline?: (input: { error: unknown; message: string }) => Effect.Effect<"retry" | "blocked" | "aborted">
     // kilocode_change end
   }) {
     return Schedule.fromStepWithMetadata(
       Effect.succeed((meta: Schedule.InputMetadata<unknown>) => {
-        // kilocode_change start — enforce retry limit
+        // kilocode_change start — foreground children never retry the same provider/model attempt
+        if (opts.retry === false) return Cause.done(meta.attempt)
         if (opts.limit !== undefined && meta.attempt > opts.limit) {
           return Cause.done(meta.attempt)
         }

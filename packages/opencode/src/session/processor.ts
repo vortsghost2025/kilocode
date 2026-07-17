@@ -18,9 +18,11 @@ import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
 import type { Provider } from "@/provider/provider"
+import type { ProjectID } from "@/project/schema" // kilocode_change
 import { Question } from "@/question"
 import { KiloSessionProcessor } from "@/kilocode/session/processor" // kilocode_change
 import { Flag } from "@/flag/flag" // kilocode_change
+import { ForegroundTask } from "@/kilocode/foreground-task" // kilocode_change
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -55,6 +57,7 @@ export namespace SessionProcessor {
   }
 
   interface ProcessorContext extends Input {
+    projectID: ProjectID // kilocode_change
     toolcalls: Record<string, MessageV2.ToolPart>
     shouldBreak: boolean
     snapshot: string | undefined
@@ -95,9 +98,11 @@ export namespace SessionProcessor {
       const status = yield* SessionStatus.Service
 
       const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
+        const info = yield* session.get(input.sessionID) // kilocode_change
         const ctx: ProcessorContext = {
           assistantMessage: input.assistantMessage,
           sessionID: input.sessionID,
+          projectID: info.projectID, // kilocode_change
           model: input.model,
           abort: input.abort,
           toolcalls: {},
@@ -479,6 +484,7 @@ export namespace SessionProcessor {
             yield* stream.pipe(
               Stream.tap((event) =>
                 Effect.gen(function* () {
+                  ForegroundTask.touch(ctx.projectID, ctx.sessionID) // kilocode_change — reset the child watchdog on stream progress
                   input.abort.throwIfAborted()
                   yield* handleEvent(event)
                 }),
@@ -495,6 +501,7 @@ export namespace SessionProcessor {
               SessionRetry.policy({
                 parse,
                 // kilocode_change start
+                retry: !ForegroundTask.has(ctx.projectID, ctx.sessionID),
                 limit: Flag.KILO_SESSION_RETRY_LIMIT,
                 offline: (info) =>
                   KiloSessionProcessor.handleOffline({

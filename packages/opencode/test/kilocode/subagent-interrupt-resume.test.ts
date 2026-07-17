@@ -54,11 +54,7 @@ async function seed() {
   return { session, assistantID }
 }
 
-function ctx(input: {
-  sessionID: SessionID
-  messageID: MessageID
-  metadata?: (value: unknown) => void
-}) {
+function ctx(input: { sessionID: SessionID; messageID: MessageID; metadata?: (value: unknown) => void }) {
   return {
     sessionID: input.sessionID,
     messageID: input.messageID,
@@ -277,12 +273,12 @@ describe("kilocode subagent interrupt resume", () => {
 
           await startedSecond.promise
           expect(resumedID).toBe(childID)
-          expect(ForegroundTask.has(childID)).toBe(true)
+          expect(ForegroundTask.has(session.projectID, childID)).toBe(true)
 
           first.reject(new Error("old child finally rejected"))
           await Bun.sleep(0)
 
-          expect(ForegroundTask.has(childID)).toBe(true)
+          expect(ForegroundTask.has(session.projectID, childID)).toBe(true)
           expect(Array.from(Session.list()).length).toBe(count)
 
           await SessionPrompt.cancel(childID)
@@ -291,7 +287,7 @@ describe("kilocode subagent interrupt resume", () => {
             sessionId: childID,
             interrupted: true,
           })
-          expect(ForegroundTask.has(childID)).toBe(false)
+          expect(ForegroundTask.has(session.projectID, childID)).toBe(false)
           expect(Array.from(Session.list()).length).toBe(count)
         } finally {
           second.reject(new Error("late resumed rejection"))

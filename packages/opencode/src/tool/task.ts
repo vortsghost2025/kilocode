@@ -11,9 +11,11 @@ import { defer } from "@/util/defer"
 import { Config } from "../config/config"
 import { Permission } from "@/permission"
 import { ForegroundTask } from "@/kilocode/foreground-task" // kilocode_change
+import { Log } from "@/util/log" // kilocode_change
 
 // kilocode_change start
 const inFlight = new Map<string, Set<string>>()
+const log = Log.create({ service: "tool.task" })
 // kilocode_change end
 
 const parameters = z.object({
@@ -37,6 +39,9 @@ type ForegroundOutcome =
     }
   | {
       type: "interrupted"
+    }
+  | {
+      type: "timed_out"
     }
 // kilocode_change end
 
@@ -187,19 +192,22 @@ export const TaskTool = Tool.define("task", async (ctx) => {
 
       // kilocode_change start
       const messageID = MessageID.ascending()
-
-      let gateDone = false
-      let unregister = () => {}
+      const gate = {
+        done: false,
+        unregister: () => {},
+      }
 
       const finish = (action: () => void) => {
-        if (gateDone) return
-        gateDone = true
-        unregister()
+        if (gate.done) return
+        gate.done = true
+        gate.unregister()
         action()
       }
 
       const cancelChild = () => {
-        void SessionPrompt.cancel(session.id)
+        void SessionPrompt.cancel(session.id).catch((error) => {
+          log.warn("failed to cancel foreground child", { sessionID: session.id, error })
+        })
       }
 
       ctx.abort.addEventListener("abort", cancelChild)
@@ -208,9 +216,16 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       })
 
       const outcome = await new Promise<ForegroundOutcome>((resolve, reject) => {
-        unregister = ForegroundTask.register(session.id, {
+        gate.unregister = ForegroundTask.register(session.projectID, session.id, {
           interrupt() {
             finish(() => resolve({ type: "interrupted" }))
+          },
+          timeout() {
+            cancelChild()
+            finish(() => resolve({ type: "timed_out" }))
+          },
+          complete(message) {
+            finish(() => resolve({ type: "completed", message }))
           },
         })
 
@@ -222,7 +237,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         const childPromise = (async () => {
           const promptParts = await SessionPrompt.resolvePromptParts(params.prompt)
 
-          if (gateDone) return undefined
+          if (gate.done) return undefined
 
           return SessionPrompt.prompt({
             messageID,
@@ -244,12 +259,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         childPromise.then(
           (message) => {
             if (!message) return
-            finish(() =>
-              resolve({
-                type: "completed",
-                message,
-              }),
-            )
+            finish(() => resolve({ type: "completed", message }))
           },
           (error) => {
             finish(() => reject(error))
@@ -257,25 +267,40 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         )
       })
 
-      if (outcome.type === "interrupted") {
+      if (outcome.type !== "completed") {
+        const timedOut = outcome.type === "timed_out"
         return {
           title: params.description,
           metadata: {
             ...meta,
-            interrupted: true,
+            interrupted: !timedOut,
+            ...(timedOut ? { timedOut: true } : {}),
           },
           output: [
             `task_id: ${session.id} (for resuming to continue this task if needed)`,
             "",
             "<task_result>",
-            "[Task was interrupted. Resume with the same task_id above to continue.]",
+            timedOut
+              ? "[Task timed out after producing no progress. Resume with the same task_id above to continue.]"
+              : "[Task was interrupted. Resume with the same task_id above to continue.]",
             "</task_result>",
           ].join("\n"),
         }
       }
 
       const result = outcome.message
-      const text = result.parts.findLast((part) => part.type === "text")?.text ?? ""
+      const error = result.info?.role === "assistant" ? result.info.error : undefined
+      const detail = error
+        ? "message" in error.data && typeof error.data.message === "string"
+          ? error.data.message
+          : error.name
+        : ""
+      const status =
+        error && "statusCode" in error.data && typeof error.data.statusCode === "number"
+          ? ` (HTTP ${error.data.statusCode})`
+          : ""
+      const failure = error ? `[Subagent failed${status}: ${detail}]` : ""
+      const text = result.parts.findLast((part) => part.type === "text")?.text || failure
       // kilocode_change end
 
       const output = [

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { ForegroundTask } from "../../src/kilocode/foreground-task"
 import { Interrupt } from "../../src/kilocode/interrupt"
 import { SessionID } from "../../src/session/schema"
-import { mountPromptControl } from "../fixture/tui-control-harness"
+import { mountPromptControl, projectID } from "../fixture/tui-control-harness"
 
 type HarnessInput = Parameters<typeof mountPromptControl>[0]
 type Cleanup = Parameters<NonNullable<HarnessInput["onRestore"]>>[0]
@@ -118,7 +118,9 @@ test("runtime-only ownership completes exact-child interrupt lifecycle once", as
     await harness.renderOnce()
     harness.setMetadata(false)
     await harness.renderOnce()
-    expect(harness.lifecycle().filter((result) => result.actions.some((action) => action.type === "success"))).toHaveLength(1)
+    expect(
+      harness.lifecycle().filter((result) => result.actions.some((action) => action.type === "success")),
+    ).toHaveLength(1)
     expect(
       harness.toasts.filter(
         (toast) => toast.variant === "info" && toast.message === "Subagent stopped; context preserved.",
@@ -195,8 +197,8 @@ test("mount failure restores probes before a subsequent normal harness", async (
   expect(globalThis.setTimeout).toBe(original.timeout)
   expect(globalThis.clearTimeout).toBe(original.clear)
   expect(process.listeners("SIGHUP")).toEqual(original.sighup)
-  expect(ForegroundTask.has(childID)).toBe(false)
-  expect(ForegroundTask.has(siblingID)).toBe(false)
+  expect(ForegroundTask.has(projectID, childID)).toBe(false)
+  expect(ForegroundTask.has(projectID, siblingID)).toBe(false)
   expect(cleanups).toEqual([{ listeners: 0, pending: 0, rendererDestroyed: true, toastRestored: true }])
 
   const harness = await mountPromptControl({
@@ -225,7 +227,7 @@ test("mount failure restores probes before a subsequent normal harness", async (
   expect(Object.getOwnPropertyDescriptor(Interrupt, "onForegroundTask")).toEqual(descriptor)
   expect(frame()).toEqual(original.frame)
   expect(Object.getOwnPropertyDescriptor(process.env, "OTUI_USE_CONSOLE")).toEqual(original.env)
-  expect(ForegroundTask.has(childID)).toBe(false)
+  expect(ForegroundTask.has(projectID, childID)).toBe(false)
 }, 30_000)
 
 test("exact-child ownership updates after mount without sibling interference", async () => {

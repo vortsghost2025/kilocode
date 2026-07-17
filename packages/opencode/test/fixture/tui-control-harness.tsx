@@ -7,8 +7,11 @@ import { PassThrough, Readable } from "node:stream"
 import { onCleanup, onMount, type ParentProps } from "solid-js"
 import { ForegroundTask } from "../../src/kilocode/foreground-task"
 import { Interrupt } from "../../src/kilocode/interrupt"
+import { ProjectID } from "../../src/project/schema"
 import { SessionID } from "../../src/session/schema"
 import type { ToastContext, ToastOptions } from "../../src/cli/cmd/tui/ui/toast"
+
+export const projectID = ProjectID.make("project")
 
 const color = RGBA.fromInts(220, 220, 220)
 const passthrough = (props: ParentProps) => props.children
@@ -86,7 +89,7 @@ function session(id: string, parentID?: string): Session {
   return {
     id,
     slug: id,
-    projectID: "project",
+    projectID,
     directory: process.cwd(),
     parentID,
     title: id,
@@ -123,9 +126,11 @@ export async function mountPromptControl(input: Input) {
   const listeners = new Set<Listener>()
   const requests: Array<{ method: string; path: string }> = []
   const abortSessionIDs: string[] = []
-  const sessions = [session(input.parentID), session(input.childID, input.parentID), session(input.siblingID, input.parentID)].toSorted(
-    (a, b) => a.id.localeCompare(b.id),
-  )
+  const sessions = [
+    session(input.parentID),
+    session(input.childID, input.parentID),
+    session(input.siblingID, input.parentID),
+  ].toSorted((a, b) => a.id.localeCompare(b.id))
   const messageID = `msg_${input.parentID}`
   const message: AssistantMessage = {
     id: messageID,
@@ -307,7 +312,7 @@ export async function mountPromptControl(input: Input) {
     return restoring
   }
   const register = (sessionID: SessionID) => {
-    const dispose = ForegroundTask.register(sessionID, { interrupt() {} })
+    const dispose = ForegroundTask.register(projectID, sessionID, { interrupt() {} })
     const state = { done: false }
     const tracked = () => {
       if (state.done) return
@@ -384,7 +389,10 @@ export async function mountPromptControl(input: Input) {
             if (option.value !== "session.interrupt") return option
             commandState.registered = true
             const onSelect = option.onSelect
-            const wrapped = Object.create(Object.getPrototypeOf(option), Object.getOwnPropertyDescriptors(option)) as typeof option
+            const wrapped = Object.create(
+              Object.getPrototypeOf(option),
+              Object.getOwnPropertyDescriptors(option),
+            ) as typeof option
             Object.defineProperty(wrapped, "enabled", {
               enumerable: true,
               configurable: true,
@@ -550,12 +558,12 @@ export async function mountPromptControl(input: Input) {
     trigger(name: string) {
       trigger(name)
     },
-    active: (sessionID = input.childID) => ForegroundTask.has(sessionID),
+    active: (sessionID = input.childID) => ForegroundTask.has(projectID, sessionID),
     registerRuntime(sessionID = input.childID) {
       return register(sessionID)
     },
     interruptRuntime(sessionID = input.childID) {
-      return ForegroundTask.interrupt(sessionID)
+      return ForegroundTask.interrupt(projectID, sessionID)
     },
     pending: () => pending,
     listeners: () => listeners.size,
@@ -572,8 +580,8 @@ export async function mountPromptControl(input: Input) {
     async dispose() {
       await restore()
       if (!ready.renderer.isDestroyed) throw new Error("renderer was not destroyed")
-      if (ForegroundTask.has(input.childID)) throw new Error("child foreground registration remains")
-      if (ForegroundTask.has(input.siblingID)) throw new Error("sibling foreground registration remains")
+      if (ForegroundTask.has(projectID, input.childID)) throw new Error("child foreground registration remains")
+      if (ForegroundTask.has(projectID, input.siblingID)) throw new Error("sibling foreground registration remains")
       if (listeners.size !== 0) throw new Error(`event listeners remain: ${listeners.size}`)
       if (pending !== 0) throw new Error(`SDK requests remain: ${pending}`)
     },

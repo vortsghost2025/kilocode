@@ -138,14 +138,16 @@ describe("kilocode subagent interrupt gate", () => {
           )
 
           while (!childID) await Bun.sleep(10)
-          expect(ForegroundTask.has(childID)).toBe(true)
+          expect(ForegroundTask.has(session.projectID, childID)).toBe(true)
 
           await SessionPrompt.cancel(childID)
           await cancelled.promise
 
           const result = await Promise.race([
             run,
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out waiting for interrupt")), 1000)),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("timed out waiting for interrupt")), 1000),
+            ),
           ])
 
           expect(result.metadata).toMatchObject({
@@ -153,7 +155,7 @@ describe("kilocode subagent interrupt gate", () => {
             interrupted: true,
           })
           expect(result.output).toContain(`task_id: ${childID}`)
-          expect(ForegroundTask.has(childID)).toBe(false)
+          expect(ForegroundTask.has(session.projectID, childID)).toBe(false)
           const before = ticks
           await Bun.sleep(50)
           expect(ticks).toBe(before)
@@ -224,7 +226,7 @@ describe("kilocode subagent interrupt gate", () => {
             interrupted: true,
           })
           expect(result.output).toContain(`task_id: ${childID}`)
-          expect(ForegroundTask.has(childID!)).toBe(false)
+          expect(ForegroundTask.has(session.projectID, childID!)).toBe(false)
         } finally {
           ;(SessionPrompt as any).prompt = orig
         }

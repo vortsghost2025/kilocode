@@ -5,7 +5,8 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionPrompt } from "../../src/session/prompt"
-import { SessionID } from "../../src/session/schema"
+import { MessageID, SessionID } from "../../src/session/schema"
+import { SyncEvent } from "../../src/sync"
 import { SessionStatus } from "../../src/session/status"
 import { resetDatabase } from "../fixture/db"
 import { tmpdir } from "../fixture/fixture"
@@ -18,6 +19,17 @@ function deferred<T>() {
     reject = fail
   })
   return { promise, resolve, reject }
+}
+
+function resumed(sessionID: SessionID) {
+  const done = deferred<void>()
+  const unsubscribe = SyncEvent.subscribeAll(({ def, event }) => {
+    if (def !== Session.Event.Updated) return
+    if (event.aggregateID !== sessionID) return
+    unsubscribe()
+    queueMicrotask(() => queueMicrotask(() => done.resolve()))
+  })
+  return done.promise
 }
 
 function chat(text: string) {
@@ -97,7 +109,7 @@ describe("kilocode subagent interrupt queue recovery", () => {
   test("the same parent loop processes the queued prompt after child-only interruption", async () => {
     const started = deferred<void>()
     const release = deferred<void>()
-    let calls = 0
+    const state = { calls: 0 }
     const server = Bun.serve({
       port: 0,
       async fetch(req) {
@@ -105,7 +117,7 @@ describe("kilocode subagent interrupt queue recovery", () => {
         if (!url.pathname.endsWith("/chat/completions")) {
           return new Response("not found", { status: 404 })
         }
-        calls++
+        state.calls++
         started.resolve()
         await release.promise
         return new Response(chat("QUEUE_OK"), {
@@ -151,20 +163,17 @@ describe("kilocode subagent interrupt queue recovery", () => {
         fn: async () => {
           const session = await Session.create({ title: "Queued recovery" })
           const child = deferred<MessageV2.WithParts>()
-          const idle = deferred<void>()
-          let childID: SessionID | undefined
+          const startedChild = deferred<SessionID>()
+          const drained = deferred<void>()
+          child.promise.catch(() => drained.resolve())
           let queuedDone = false
           const orig = SessionPrompt.prompt
 
           ;(SessionPrompt as any).prompt = async (input: any) => {
             if (input.sessionID === session.id) return orig(input)
-            childID = SessionID.make(input.sessionID)
+            const childID = SessionID.make(input.sessionID)
             await SessionStatus.set(childID, { type: "busy" })
-            const stop = setInterval(async () => {
-              if (!childID || (await SessionStatus.get(childID)).type !== "idle") return
-              clearInterval(stop)
-              idle.resolve()
-            }, 10)
+            startedChild.resolve(childID)
             return child.promise
           }
 
@@ -182,10 +191,12 @@ describe("kilocode subagent interrupt queue recovery", () => {
               ],
             })
 
-            while (!childID) await Bun.sleep(10)
-
+            const childID = await startedChild.promise
+            const queuedID = MessageID.ascending()
+            const saved = resumed(session.id)
             const queued = SessionPrompt.prompt({
               sessionID: session.id,
+              messageID: queuedID,
               agent: "orchestrator",
               parts: [{ type: "text", text: "queued message" }],
             })
@@ -193,12 +204,11 @@ describe("kilocode subagent interrupt queue recovery", () => {
               queuedDone = true
             })
 
-            await Bun.sleep(50)
+            await saved
             expect(queuedDone).toBe(false)
             expect(() => SessionPrompt.assertNotBusy(session.id)).toThrow()
 
             await SessionPrompt.cancel(childID)
-            await idle.promise
             await started.promise
             expect((await SessionStatus.get(session.id)).type).toBe("busy")
 
@@ -206,21 +216,27 @@ describe("kilocode subagent interrupt queue recovery", () => {
 
             const firstResult = await Promise.race([
               first,
-              new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out waiting for first prompt")), 1000)),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error("timed out waiting for first prompt")), 1000),
+              ),
             ])
             const queuedResult = await Promise.race([
               queued,
-              new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out waiting for queued prompt")), 1000)),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error("timed out waiting for queued prompt")), 1000),
+              ),
             ])
 
             expect(queuedDone).toBe(true)
             expect(firstResult.info.id).toBe(queuedResult.info.id)
             expect(firstResult.parts.some((part) => part.type === "text" && part.text.includes("QUEUE_OK"))).toBe(true)
-            expect(calls).toBe(1)
-            expect(ForegroundTask.has(childID)).toBe(false)
+            expect(state.calls).toBe(1)
+            expect(ForegroundTask.has(session.projectID, childID)).toBe(false)
 
             const messages = await Session.messages({ sessionID: session.id })
-            const toolMessage = messages.find((item) => item.info.role === "assistant" && item.info.finish === "tool-calls")
+            const toolMessage = messages.find(
+              (item) => item.info.role === "assistant" && item.info.finish === "tool-calls",
+            )
             expect(toolMessage).toBeDefined()
             if (!toolMessage) throw new Error("expected tool message")
             const parts = await MessageV2.parts(toolMessage.info.id)
@@ -233,7 +249,7 @@ describe("kilocode subagent interrupt queue recovery", () => {
             }
           } finally {
             child.reject(new Error("late child rejection"))
-            await Bun.sleep(0)
+            await drained.promise
             ;(SessionPrompt as any).prompt = orig
           }
         },
@@ -252,10 +268,13 @@ describe("kilocode subagent interrupt queue recovery", () => {
         if (!url.pathname.endsWith("/chat/completions")) {
           return new Response("not found", { status: 404 })
         }
-        return new Response(hanging(() => ready.resolve()), {
-          status: 200,
-          headers: { "Content-Type": "text/event-stream" },
-        })
+        return new Response(
+          hanging(() => ready.resolve()),
+          {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          },
+        )
       },
     })
 
@@ -299,8 +318,11 @@ describe("kilocode subagent interrupt queue recovery", () => {
           await ready.promise
 
           let settles = 0
+          const queuedID = MessageID.ascending()
+          const saved = resumed(session.id)
           const queued = SessionPrompt.prompt({
             sessionID: session.id,
+            messageID: queuedID,
             agent: "build",
             parts: [{ type: "text", text: "queued while parent busy" }],
           }).then(
@@ -314,12 +336,14 @@ describe("kilocode subagent interrupt queue recovery", () => {
             },
           )
 
-          await Bun.sleep(50)
+          await saved
           await SessionPrompt.cancel(session.id)
 
           const result = await Promise.race([
             run,
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out waiting for parent cancel")), 1000)),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("timed out waiting for parent cancel")), 1000),
+            ),
           ])
           expect(result.info.role).toBe("assistant")
           if (result.info.role === "assistant") {
@@ -328,7 +352,9 @@ describe("kilocode subagent interrupt queue recovery", () => {
 
           const err = await Promise.race([
             queued,
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out waiting for queued rejection")), 1000)),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("timed out waiting for queued rejection")), 1000),
+            ),
           ])
 
           expect(settles).toBe(1)
@@ -336,6 +362,87 @@ describe("kilocode subagent interrupt queue recovery", () => {
           if (err instanceof DOMException) {
             expect(err.name).toBe("AbortError")
           }
+        },
+      })
+    } finally {
+      server.stop(true)
+    }
+  }, 20000)
+
+  test("unavailable deterministic subtask becomes a recoverable tool error", async () => {
+    let calls = 0
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url)
+        if (!url.pathname.endsWith("/chat/completions")) return new Response("not found", { status: 404 })
+        calls++
+        return new Response(chat("RECOVERED_AFTER_INVALID_TOOL"), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        })
+      },
+    })
+
+    try {
+      await using tmp = await tmpdir({
+        git: true,
+        init: async (dir) => {
+          await Bun.write(
+            `${dir}/opencode.json`,
+            JSON.stringify({
+              $schema: "https://opencode.ai/config.json",
+              enabled_providers: ["alibaba"],
+              provider: {
+                alibaba: {
+                  options: {
+                    apiKey: "test-key",
+                    baseURL: `${server.url.origin}/v1`,
+                  },
+                },
+              },
+              agent: {
+                orchestrator: {
+                  model: "alibaba/qwen-plus",
+                },
+              },
+            }),
+          )
+        },
+      })
+
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const session = await Session.create({ title: "Invalid subtask recovery" })
+          const result = await SessionPrompt.prompt({
+            sessionID: session.id,
+            agent: "orchestrator",
+            parts: [
+              {
+                type: "subtask",
+                agent: "missing-agent",
+                description: "missing",
+                prompt: "do not run",
+                command: "recover",
+              },
+            ],
+          })
+
+          expect(calls).toBe(1)
+          expect(
+            result.parts.some((part) => part.type === "text" && part.text.includes("RECOVERED_AFTER_INVALID_TOOL")),
+          ).toBe(true)
+
+          const messages = await Session.messages({ sessionID: session.id })
+          const invalid = messages
+            .flatMap((message) => message.parts)
+            .find((part) => part.type === "tool" && part.tool === "task" && part.state.status === "error")
+          expect(invalid).toBeDefined()
+          if (!invalid || invalid.type !== "tool" || invalid.state.status !== "error") {
+            throw new Error("expected recoverable task tool error")
+          }
+          expect(invalid.state.error).toContain('Agent not found: "missing-agent"')
         },
       })
     } finally {

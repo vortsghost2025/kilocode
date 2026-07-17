@@ -10,6 +10,7 @@ import { useSDK } from "@tui/context/sdk"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { MessageID, PartID, SessionID } from "@/session/schema" // kilocode_change
+import { ProjectID } from "@/project/schema" // kilocode_change
 import { createStore, produce } from "solid-js/store"
 import { useKeybind } from "@tui/context/keybind"
 import { usePromptHistory, type PromptInfo } from "./history"
@@ -86,7 +87,9 @@ export function Prompt(props: PromptProps) {
   const sync = useSync()
   const dialog = useDialog()
   const toast = useToast()
-  const statusType = createMemo(() => sync.data.session_status?.[props.sessionID ?? ""]?.type as Interrupt.StatusType | undefined) // kilocode_change
+  const statusType = createMemo(
+    () => sync.data.session_status?.[props.sessionID ?? ""]?.type as Interrupt.StatusType | undefined,
+  ) // kilocode_change
   const status = createMemo(() => sync.data.session_status?.[props.sessionID ?? ""] ?? { type: "idle" })
   // kilocode_change start - allow hidden child prompts to interrupt foreground subagents
   const child = createMemo(() => {
@@ -101,9 +104,15 @@ export function Prompt(props: PromptProps) {
       setRuntimeForegroundTaskActive(false)
       return
     }
+    const session = sync.session.get(id)
+    if (!session?.projectID) {
+      setRuntimeForegroundTaskActive(false)
+      return
+    }
+    const projectID = ProjectID.make(session.projectID)
     const sessionID = SessionID.make(id)
-    setRuntimeForegroundTaskActive(ForegroundTask.has(sessionID))
-    const unsubscribe = ForegroundTask.subscribe(sessionID, setRuntimeForegroundTaskActive)
+    setRuntimeForegroundTaskActive(ForegroundTask.has(projectID, sessionID))
+    const unsubscribe = ForegroundTask.subscribe(projectID, sessionID, setRuntimeForegroundTaskActive)
     onCleanup(unsubscribe)
   })
   const [interrupt, setInterrupt] = createSignal<Interrupt.State>({
@@ -324,7 +333,7 @@ export function Prompt(props: PromptProps) {
         hidden: true,
         // kilocode_change start - child-aware interrupt handler with normal-session error support
         enabled: Interrupt.available(statusType(), foregroundChildActive()),
-          onSelect: (dialog) => {
+        onSelect: (dialog) => {
           if (autocomplete.visible) return
           if (!input.focused && !child()) return
           // TODO: this should be its own command
@@ -361,7 +370,7 @@ export function Prompt(props: PromptProps) {
             })
           }
           dialog.clear()
-            // kilocode_change end
+          // kilocode_change end
         },
       },
       {

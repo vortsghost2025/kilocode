@@ -273,10 +273,11 @@ export namespace SessionPrompt {
 
   export async function cancel(sessionID: SessionID) {
     log.info("cancel", { sessionID })
+    const session = await Session.get(sessionID) // kilocode_change
     const s = state()
     const match = s[sessionID]
     if (!match) {
-      ForegroundTask.interrupt(sessionID) // kilocode_change
+      ForegroundTask.interrupt(session.projectID, sessionID) // kilocode_change
       await SessionStatus.set(sessionID, { type: "idle" })
       return
     }
@@ -293,7 +294,7 @@ export namespace SessionPrompt {
     // kilocode_change end
 
     delete s[sessionID]
-    ForegroundTask.interrupt(sessionID) // kilocode_change
+    ForegroundTask.interrupt(session.projectID, sessionID) // kilocode_change
     await SessionStatus.set(sessionID, { type: "idle" })
     return
   }
@@ -469,6 +470,7 @@ export namespace SessionPrompt {
           { args: taskArgs },
         )
         let executionError: Error | undefined
+        // kilocode_change start — unavailable deterministic subtasks become recoverable tool errors
         const taskAgent = await Agent.get(task.agent)
         if (!taskAgent) {
           const available = await Agent.list().then((agents) => agents.filter((a) => !a.hidden).map((a) => a.name))
@@ -478,7 +480,7 @@ export namespace SessionPrompt {
             sessionID,
             error: error.toObject(),
           })
-          throw error
+          executionError = new Error(error.data.message, { cause: error })
         }
         const taskCtx: Tool.Context = {
           agent: task.agent,
@@ -502,15 +504,18 @@ export namespace SessionPrompt {
             await Permission.ask({
               ...req,
               sessionID: sessionID,
-              ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
+              ruleset: Permission.merge(taskAgent?.permission ?? [], session.permission ?? []),
             })
           },
         }
-        const result = await taskTool.execute(taskArgs, taskCtx).catch((error) => {
-          executionError = error
-          log.error("subtask execution failed", { error, agent: task.agent, description: task.description })
-          return undefined
-        })
+        const result = taskAgent
+          ? await taskTool.execute(taskArgs, taskCtx).catch((error) => {
+              executionError = error
+              log.error("subtask execution failed", { error, agent: task.agent, description: task.description })
+              return undefined
+            })
+          : undefined
+        // kilocode_change end
         const attachments = result?.attachments?.map((attachment) => ({
           ...attachment,
           id: PartID.ascending(),
@@ -821,11 +826,13 @@ export namespace SessionPrompt {
     SessionCompaction.prune({ sessionID })
     // kilocode_change start
     finished = true
-    return KiloSessionPrompt.resolveFinishedMessages({
+    const result = await KiloSessionPrompt.resolveFinishedMessages({
       sessionID,
       callbacks: state()[sessionID]?.callbacks ?? [],
       abort,
     })
+    ForegroundTask.complete(session.projectID, sessionID, result)
+    return result
     // kilocode_change end
   })
 
