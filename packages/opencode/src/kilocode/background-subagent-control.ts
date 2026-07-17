@@ -1,9 +1,11 @@
 // kilocode_change - new file
 import { MessageV2 } from "@/session/message-v2"
+import { Instance } from "@/project/instance"
 import type { SessionID } from "@/session/schema"
 import { BackgroundSubagentStart } from "./background-subagent-start"
 import { BackgroundTask } from "./background-task"
 import { BackgroundTaskSessionCancel } from "./background-task-session-cancel"
+import { SubagentTaskControl } from "./subagent-task-control"
 
 export namespace BackgroundSubagentControl {
   export interface HandleInput {
@@ -16,12 +18,23 @@ export namespace BackgroundSubagentControl {
     message: MessageV2.WithParts | undefined
   }
 
-  const claims = new Map<BackgroundTask.TaskID, BackgroundTask.Claim>()
+  // Temporary A6D1 control-capability retention. Remove in A6D2.
+  const handles = Instance.state(
+    () => new Map<BackgroundTask.TaskID, SubagentTaskControl.Handle>(),
+    async (current) => current.clear(),
+  )
 
   export async function start(input: BackgroundSubagentStart.Input): Promise<BackgroundTask.Info> {
     const started = await BackgroundSubagentStart.start(input)
-    claims.set(started.info.taskID, started.claim)
-    return started.info
+    const published = SubagentTaskControl.publish(started.handle)
+    if (!published.applied || !published.info) {
+      started.observer.release()
+      SubagentTaskControl.discardUnpublished(started.handle)
+      throw new Error("Background task publication failed")
+    }
+    handles().set(published.info.ref.taskID, started.handle)
+    void started.observer.activate()
+    return BackgroundTask.project(published.info)
   }
 
   export function status(input: HandleInput): BackgroundTask.Info | undefined {
@@ -34,9 +47,7 @@ export namespace BackgroundSubagentControl {
   export async function result(input: HandleInput): Promise<ResultView | undefined> {
     const info = status(input)
     if (!info) return undefined
-    if (info.status !== "completed") {
-      return { info, message: undefined }
-    }
+    if (info.status !== "completed") return { info, message: undefined }
     if (!info.resultMessageID) {
       throw new Error(`Background task completed without result message: ${input.taskID}`)
     }
@@ -50,15 +61,13 @@ export namespace BackgroundSubagentControl {
   export async function cancel(input: HandleInput): Promise<BackgroundTask.TransitionResult | undefined> {
     const info = status(input)
     if (!info) return undefined
-    const claim = claims.get(input.taskID)
-    if (!claim) {
-      throw new Error(`Background task claim unavailable: ${input.taskID}`)
-    }
-    return BackgroundTaskSessionCancel.cancel(claim)
+    const handle = handles().get(input.taskID)
+    if (!handle) throw new Error(`Background task handle unavailable: ${input.taskID}`)
+    return BackgroundTaskSessionCancel.cancel(handle)
   }
 
   /** @internal Exported for tests. */
   export function resetForTests() {
-    claims.clear()
+    handles().clear()
   }
 }

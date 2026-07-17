@@ -4,6 +4,7 @@ import { Identifier } from "../../src/id/id"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { BackgroundTask } from "../../src/kilocode/background-task"
 import { BackgroundTaskCancel } from "../../src/kilocode/background-task-cancel"
+import { SubagentTaskControl } from "../../src/kilocode/subagent-task-control"
 import { tmpdir } from "../fixture/fixture"
 
 function test(name: string, fn: () => void | Promise<void>) {
@@ -27,7 +28,7 @@ describe("BackgroundTaskCancel", () => {
   test("queued task transitions to cancelled", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -35,7 +36,7 @@ describe("BackgroundTaskCancel", () => {
 
     let called = false
     const result = await BackgroundTaskCancel.cancel({
-      claim,
+      handle,
       cancelChild: () => {
         called = true
       },
@@ -58,7 +59,7 @@ describe("BackgroundTaskCancel", () => {
 
     let called = false
     const result = await BackgroundTaskCancel.cancel({
-      claim: created.claim,
+      handle: created.handle,
       cancelChild: () => {
         called = true
       },
@@ -72,7 +73,7 @@ describe("BackgroundTaskCancel", () => {
   test("cancelChild receives the exact registry childSessionID", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -80,7 +81,7 @@ describe("BackgroundTaskCancel", () => {
 
     let receivedSID: SessionID | undefined
     await BackgroundTaskCancel.cancel({
-      claim,
+      handle,
       cancelChild: (sid) => {
         receivedSID = sid
       },
@@ -92,7 +93,7 @@ describe("BackgroundTaskCancel", () => {
   test("cancelChild executes only after registry status is cancelled", async () => {
     const parent = sid()
     const child = sid()
-    const { claim, info } = BackgroundTask.create({
+    const { handle, info } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -100,7 +101,7 @@ describe("BackgroundTaskCancel", () => {
 
     let statusAtCallback: BackgroundTask.Status | undefined
     await BackgroundTaskCancel.cancel({
-      claim,
+      handle,
       cancelChild: () => {
         statusAtCallback = BackgroundTask.get(info.taskID)?.status
       },
@@ -112,7 +113,7 @@ describe("BackgroundTaskCancel", () => {
   test("cancelChild is invoked exactly once", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -120,7 +121,7 @@ describe("BackgroundTaskCancel", () => {
 
     let count = 0
     await BackgroundTaskCancel.cancel({
-      claim,
+      handle,
       cancelChild: () => {
         count++
       },
@@ -139,7 +140,7 @@ describe("BackgroundTaskCancel", () => {
     })
 
     const result = await BackgroundTaskCancel.cancel({
-      claim: created.claim,
+      handle: created.handle,
       cancelChild: () => {},
     })
 
@@ -154,7 +155,7 @@ describe("BackgroundTaskCancel", () => {
   test("concurrent cancellation invokes cancelChild only once", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -166,8 +167,8 @@ describe("BackgroundTaskCancel", () => {
     }
 
     const [r1, r2] = await Promise.all([
-      BackgroundTaskCancel.cancel({ claim, cancelChild }),
-      BackgroundTaskCancel.cancel({ claim, cancelChild }),
+      BackgroundTaskCancel.cancel({ handle, cancelChild }),
+      BackgroundTaskCancel.cancel({ handle, cancelChild }),
     ])
 
     const applied = [r1.applied, r2.applied]
@@ -178,21 +179,21 @@ describe("BackgroundTaskCancel", () => {
   test("second cancellation returns applied=false", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
     })
 
     const r1 = await BackgroundTaskCancel.cancel({
-      claim,
+      handle,
       cancelChild: () => {},
     })
     expect(r1.applied).toBe(true)
 
     let called = false
     const r2 = await BackgroundTaskCancel.cancel({
-      claim,
+      handle,
       cancelChild: () => {
         called = true
       },
@@ -214,7 +215,7 @@ describe("BackgroundTaskCancel", () => {
 
     let called = false
     const result = await BackgroundTaskCancel.cancel({
-      claim: created.claim,
+      handle: created.handle,
       cancelChild: () => {
         called = true
       },
@@ -237,7 +238,7 @@ describe("BackgroundTaskCancel", () => {
 
     let called = false
     const result = await BackgroundTaskCancel.cancel({
-      claim: created.claim,
+      handle: created.handle,
       cancelChild: () => {
         called = true
       },
@@ -259,7 +260,7 @@ describe("BackgroundTaskCancel", () => {
 
     let called = false
     const result = await BackgroundTaskCancel.cancel({
-      claim: created.claim,
+      handle: created.handle,
       cancelChild: () => {
         called = true
       },
@@ -290,7 +291,7 @@ describe("BackgroundTaskCancel", () => {
 
     let called = false
     const result = await BackgroundTaskCancel.cancel({
-      claim: first.claim,
+      handle: first.handle,
       cancelChild: () => {
         called = true
       },
@@ -304,15 +305,11 @@ describe("BackgroundTaskCancel", () => {
   test("missing task returns applied=false with info undefined", async () => {
     const parent = sid()
     const child = sid()
-    const fakeClaim: BackgroundTask.Claim = {
-      taskID: "bg_nonexistent",
-      generation: 1,
-      ownerToken: Symbol("fake"),
-    }
+    const fakeHandle = Object.freeze({}) as SubagentTaskControl.Handle
 
     let called = false
     const result = await BackgroundTaskCancel.cancel({
-      claim: fakeClaim,
+      handle: fakeHandle,
       cancelChild: () => {
         called = true
       },
@@ -336,7 +333,7 @@ describe("BackgroundTaskCancel", () => {
     let rejected: unknown
     try {
       await BackgroundTaskCancel.cancel({
-        claim: created.claim,
+        handle: created.handle,
         cancelChild: () => {
           throw err
         },
@@ -364,7 +361,7 @@ describe("BackgroundTaskCancel", () => {
     let rejected: unknown
     try {
       await BackgroundTaskCancel.cancel({
-        claim: created.claim,
+        handle: created.handle,
         cancelChild: async () => {
           throw err
         },
@@ -382,7 +379,7 @@ describe("BackgroundTaskCancel", () => {
   test("no parent session ID is passed to the callback", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -390,7 +387,7 @@ describe("BackgroundTaskCancel", () => {
 
     const received: SessionID[] = []
     await BackgroundTaskCancel.cancel({
-      claim,
+      handle,
       cancelChild: (sid) => {
         received.push(sid)
       },

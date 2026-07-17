@@ -56,7 +56,7 @@ describe("BackgroundTaskCompletion", () => {
     const completion = defer<{ resultMessageID: MessageID }>()
 
     const p = BackgroundTaskCompletion.observe({
-      claim: created.claim,
+      resolve: () => created.handle,
       completion: completion.promise,
     })
 
@@ -73,7 +73,7 @@ describe("BackgroundTaskCompletion", () => {
     const result = mid()
 
     const p = BackgroundTaskCompletion.observe({
-      claim: created.claim,
+      resolve: () => created.handle,
       completion: Promise.resolve({ resultMessageID: result }),
     })
 
@@ -88,7 +88,7 @@ describe("BackgroundTaskCompletion", () => {
     const result = mid()
 
     const tr = await BackgroundTaskCompletion.observe({
-      claim: created.claim,
+      resolve: () => created.handle,
       completion: Promise.resolve({ resultMessageID: result }),
     })
 
@@ -103,7 +103,7 @@ describe("BackgroundTaskCompletion", () => {
     const result = mid()
 
     const tr = await BackgroundTaskCompletion.observe({
-      claim: created.claim,
+      resolve: () => created.handle,
       completion: Promise.resolve({ resultMessageID: result }),
     })
 
@@ -117,7 +117,7 @@ describe("BackgroundTaskCompletion", () => {
     const boom = new Error("child crashed")
 
     const tr = await BackgroundTaskCompletion.observe({
-      claim: created.claim,
+      resolve: () => created.handle,
       completion: Promise.reject(boom),
     })
 
@@ -133,7 +133,7 @@ describe("BackgroundTaskCompletion", () => {
     const thrown = "raw string error"
 
     const tr = await BackgroundTaskCompletion.observe({
-      claim: created.claim,
+      resolve: () => created.handle,
       completion: Promise.reject(thrown),
     })
 
@@ -149,7 +149,7 @@ describe("BackgroundTaskCompletion", () => {
     const boom = new TypeError("boom")
 
     const tr = await BackgroundTaskCompletion.observe({
-      claim: created.claim,
+      resolve: () => created.handle,
       completion: Promise.reject(boom),
     })
 
@@ -162,7 +162,7 @@ describe("BackgroundTaskCompletion", () => {
     const completion = defer<{ resultMessageID: MessageID }>()
 
     const p = BackgroundTaskCompletion.observe({
-      claim: created.claim,
+      resolve: () => created.handle,
       completion: completion.promise,
     })
 
@@ -180,7 +180,7 @@ describe("BackgroundTaskCompletion", () => {
     const completion = defer<{ resultMessageID: MessageID }>()
 
     const p = BackgroundTaskCompletion.observe({
-      claim: created.claim,
+      resolve: () => created.handle,
       completion: completion.promise,
     })
 
@@ -198,7 +198,7 @@ describe("BackgroundTaskCompletion", () => {
     const firstResult = mid()
 
     const p = BackgroundTaskCompletion.observe({
-      claim: first.claim,
+      resolve: () => first.handle,
       completion: Promise.resolve({ resultMessageID: firstResult }),
     })
 
@@ -223,11 +223,7 @@ describe("BackgroundTaskCompletion", () => {
   })
   test("missing task returns applied false with info undefined", async () => {
     const result = await BackgroundTaskCompletion.observe({
-      claim: {
-        taskID: "bg_nonexistent",
-        generation: 1,
-        ownerToken: Symbol("missing"),
-      },
+      resolve: () => undefined,
       completion: Promise.resolve({ resultMessageID: mid() }),
     })
 

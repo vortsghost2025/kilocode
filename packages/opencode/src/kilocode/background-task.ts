@@ -1,4 +1,3 @@
-import { randomUUID } from "crypto"
 import type { MessageID, SessionID } from "@/session/schema"
 import { SubagentTaskControl } from "./subagent-task-control"
 
@@ -34,6 +33,8 @@ export namespace BackgroundTask {
   export interface CreateResult {
     info: Info
     claim: Claim
+    ref: SubagentTaskControl.TaskRef
+    handle: SubagentTaskControl.Handle
   }
 
   export interface TransitionResult {
@@ -65,7 +66,7 @@ export namespace BackgroundTask {
     return "queued"
   }
 
-  function view(input: SubagentTaskControl.Info): Info {
+  export function project(input: SubagentTaskControl.Info): Info {
     if (!input.child) throw new Error(`Background task child unavailable: ${input.ref.taskID}`)
     const result = input.result
     return {
@@ -83,53 +84,76 @@ export namespace BackgroundTask {
     }
   }
 
-  function outcome(input: SubagentTaskControl.TransitionResult): TransitionResult {
+  export function projectTransition(input: SubagentTaskControl.TransitionResult): TransitionResult {
     return {
       applied: input.applied,
-      info: input.info ? view(input.info) : undefined,
+      info: input.info ? project(input.info) : undefined,
     }
   }
 
   export function create(input: CreateInput): CreateResult {
-    const created = SubagentTaskControl.create({
-      taskID: input.taskID ?? `bg_${randomUUID()}`,
-      parentSessionID: input.parentSessionID,
-      agentID: "background",
-      childSessionID: input.childSessionID,
-      childUserMessageID: input.childUserMessageID,
-      now: input.now,
-    })
+    const created = input.taskID
+      ? SubagentTaskControl.create({
+          taskID: input.taskID,
+          parentSessionID: input.parentSessionID,
+          agentID: "background",
+          childSessionID: input.childSessionID,
+          childUserMessageID: input.childUserMessageID,
+          now: input.now,
+        })
+      : (() => {
+          const task = SubagentTaskControl.createBackground({
+            parentSessionID: input.parentSessionID,
+            agentID: "background",
+            now: input.now,
+          })
+          try {
+            const attached = SubagentTaskControl.attachChild(task.handle, {
+              childSessionID: input.childSessionID,
+              childUserMessageID: input.childUserMessageID,
+            })
+            if (!attached.applied || !attached.info) throw new Error("Background task child attachment failed")
+            const published = SubagentTaskControl.publish(task.handle)
+            if (!published.applied || !published.info) throw new Error("Background task publication failed")
+            return { ...task, info: published.info }
+          } catch (err) {
+            SubagentTaskControl.discardUnpublished(task.handle)
+            throw err
+          }
+        })()
     return {
-      info: view(created.info),
+      info: project(created.info),
       claim: SubagentTaskControl.compatibilityClaim(created.handle),
+      ref: created.ref,
+      handle: created.handle,
     }
   }
 
   export function get(taskID: TaskID) {
     const info = SubagentTaskControl.compatibilityGet(taskID)
-    return info?.child ? view(info) : undefined
+    return info?.child ? project(info) : undefined
   }
 
   export function list(input?: { parentSessionID?: SessionID }) {
     return SubagentTaskControl.compatibilityList(input)
       .filter((info) => info.child)
-      .map(view)
+      .map(project)
   }
 
   export function transitionToRunning(input: RunningInput) {
-    return outcome(SubagentTaskControl.compatibilityRunning(input))
+    return projectTransition(SubagentTaskControl.compatibilityRunning(input))
   }
 
   export function transitionToCompleted(input: CompletedInput) {
-    return outcome(SubagentTaskControl.compatibilityCompleted(input))
+    return projectTransition(SubagentTaskControl.compatibilityCompleted(input))
   }
 
   export function transitionToFailed(input: FailedInput) {
-    return outcome(SubagentTaskControl.compatibilityFailed(input))
+    return projectTransition(SubagentTaskControl.compatibilityFailed(input))
   }
 
   export function transitionToCancelled(input: CancelledInput) {
-    return outcome(SubagentTaskControl.compatibilityCancelled(input))
+    return projectTransition(SubagentTaskControl.compatibilityCancelled(input))
   }
 
   /** @internal Exported for tests. */

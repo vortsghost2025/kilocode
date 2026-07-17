@@ -5,6 +5,7 @@ import { MessageID, SessionID } from "../../src/session/schema"
 import { SessionPrompt } from "../../src/session/prompt"
 import { BackgroundTask } from "../../src/kilocode/background-task"
 import { BackgroundTaskSessionCancel } from "../../src/kilocode/background-task-session-cancel"
+import { SubagentTaskControl } from "../../src/kilocode/subagent-task-control"
 import { tmpdir } from "../fixture/fixture"
 
 function test(name: string, fn: () => void | Promise<void>) {
@@ -28,7 +29,7 @@ describe("BackgroundTaskSessionCancel", () => {
   test("queued task cancellation calls SessionPrompt.cancel with exact childSessionID", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -41,7 +42,7 @@ describe("BackgroundTaskSessionCancel", () => {
         receivedSID = sid
       }
 
-      await BackgroundTaskSessionCancel.cancel(claim)
+      await BackgroundTaskSessionCancel.cancel(handle)
       expect(receivedSID).toBe(child)
     } finally {
       SessionPrompt.cancel = originalCancel
@@ -65,7 +66,7 @@ describe("BackgroundTaskSessionCancel", () => {
         receivedSID = sid
       }
 
-      await BackgroundTaskSessionCancel.cancel(created.claim)
+      await BackgroundTaskSessionCancel.cancel(created.handle)
       expect(receivedSID).toBe(child)
     } finally {
       SessionPrompt.cancel = originalCancel
@@ -75,7 +76,7 @@ describe("BackgroundTaskSessionCancel", () => {
   test("registry status is already cancelled when SessionPrompt.cancel executes", async () => {
     const parent = sid()
     const child = sid()
-    const { claim, info } = BackgroundTask.create({
+    const { handle, info } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -88,7 +89,7 @@ describe("BackgroundTaskSessionCancel", () => {
         statusAtCallback = BackgroundTask.get(info.taskID)?.status
       }
 
-      await BackgroundTaskSessionCancel.cancel(claim)
+      await BackgroundTaskSessionCancel.cancel(handle)
       expect(statusAtCallback).toBe("cancelled")
     } finally {
       SessionPrompt.cancel = originalCancel
@@ -98,7 +99,7 @@ describe("BackgroundTaskSessionCancel", () => {
   test("parent session ID is never passed", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -111,7 +112,7 @@ describe("BackgroundTaskSessionCancel", () => {
         received.push(sid)
       }
 
-      await BackgroundTaskSessionCancel.cancel(claim)
+      await BackgroundTaskSessionCancel.cancel(handle)
       expect(received.length).toBe(1)
       expect(received[0]).toBe(child)
       expect(received[0]).not.toBe(parent)
@@ -123,7 +124,7 @@ describe("BackgroundTaskSessionCancel", () => {
   test("SessionPrompt.cancel is called exactly once", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -136,7 +137,7 @@ describe("BackgroundTaskSessionCancel", () => {
         count++
       }
 
-      await BackgroundTaskSessionCancel.cancel(claim)
+      await BackgroundTaskSessionCancel.cancel(handle)
       expect(count).toBe(1)
     } finally {
       SessionPrompt.cancel = originalCancel
@@ -146,7 +147,7 @@ describe("BackgroundTaskSessionCancel", () => {
   test("two concurrent cancel calls invoke SessionPrompt.cancel exactly once", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -160,8 +161,8 @@ describe("BackgroundTaskSessionCancel", () => {
       }
 
       const [r1, r2] = await Promise.all([
-        BackgroundTaskSessionCancel.cancel(claim),
-        BackgroundTaskSessionCancel.cancel(claim),
+        BackgroundTaskSessionCancel.cancel(handle),
+        BackgroundTaskSessionCancel.cancel(handle),
       ])
 
       const applied = [r1.applied, r2.applied]
@@ -175,7 +176,7 @@ describe("BackgroundTaskSessionCancel", () => {
   test("second cancellation returns applied=false", async () => {
     const parent = sid()
     const child = sid()
-    const { claim } = BackgroundTask.create({
+    const { handle } = BackgroundTask.create({
       parentSessionID: parent,
       childSessionID: child,
       childUserMessageID: mid(),
@@ -185,7 +186,7 @@ describe("BackgroundTaskSessionCancel", () => {
     try {
       SessionPrompt.cancel = async () => {}
 
-      const r1 = await BackgroundTaskSessionCancel.cancel(claim)
+      const r1 = await BackgroundTaskSessionCancel.cancel(handle)
       expect(r1.applied).toBe(true)
 
       let called = false
@@ -193,7 +194,7 @@ describe("BackgroundTaskSessionCancel", () => {
         called = true
       }
 
-      const r2 = await BackgroundTaskSessionCancel.cancel(claim)
+      const r2 = await BackgroundTaskSessionCancel.cancel(handle)
       expect(r2.applied).toBe(false)
       expect(called).toBe(false)
     } finally {
@@ -219,7 +220,7 @@ describe("BackgroundTaskSessionCancel", () => {
         called = true
       }
 
-      const result = await BackgroundTaskSessionCancel.cancel(created.claim)
+      const result = await BackgroundTaskSessionCancel.cancel(created.handle)
       expect(result.applied).toBe(false)
       expect(called).toBe(false)
     } finally {
@@ -245,7 +246,7 @@ describe("BackgroundTaskSessionCancel", () => {
         called = true
       }
 
-      const result = await BackgroundTaskSessionCancel.cancel(created.claim)
+      const result = await BackgroundTaskSessionCancel.cancel(created.handle)
       expect(result.applied).toBe(false)
       expect(called).toBe(false)
     } finally {
@@ -270,7 +271,7 @@ describe("BackgroundTaskSessionCancel", () => {
         called = true
       }
 
-      const result = await BackgroundTaskSessionCancel.cancel(created.claim)
+      const result = await BackgroundTaskSessionCancel.cancel(created.handle)
       expect(result.applied).toBe(false)
       expect(called).toBe(false)
     } finally {
@@ -303,7 +304,7 @@ describe("BackgroundTaskSessionCancel", () => {
         called = true
       }
 
-      const result = await BackgroundTaskSessionCancel.cancel(first.claim)
+      const result = await BackgroundTaskSessionCancel.cancel(first.handle)
       expect(result.applied).toBe(false)
       expect(called).toBe(false)
       expect(second.info.generation).toBe(first.info.generation + 1)
@@ -313,11 +314,7 @@ describe("BackgroundTaskSessionCancel", () => {
   })
 
   test("missing task returns applied=false with info undefined", async () => {
-    const fakeClaim: BackgroundTask.Claim = {
-      taskID: "bg_nonexistent",
-      generation: 1,
-      ownerToken: Symbol("fake"),
-    }
+    const fakeHandle = Object.freeze({}) as SubagentTaskControl.Handle
 
     const originalCancel = SessionPrompt.cancel
     try {
@@ -326,7 +323,7 @@ describe("BackgroundTaskSessionCancel", () => {
         called = true
       }
 
-      const result = await BackgroundTaskSessionCancel.cancel(fakeClaim)
+      const result = await BackgroundTaskSessionCancel.cancel(fakeHandle)
       expect(result.applied).toBe(false)
       expect(result.info).toBeUndefined()
       expect(called).toBe(false)
@@ -356,7 +353,7 @@ describe("BackgroundTaskSessionCancel", () => {
 
       let rejected: unknown
       try {
-        await BackgroundTaskSessionCancel.cancel(created.claim)
+        await BackgroundTaskSessionCancel.cancel(created.handle)
       } catch (e) {
         rejected = e
       }
@@ -393,7 +390,7 @@ describe("BackgroundTaskSessionCancel", () => {
 
       let rejected: unknown
       try {
-        await BackgroundTaskSessionCancel.cancel(created.claim)
+        await BackgroundTaskSessionCancel.cancel(created.handle)
       } catch (error) {
         rejected = error
       }
@@ -419,7 +416,7 @@ describe("BackgroundTaskSessionCancel", () => {
     try {
       SessionPrompt.cancel = async () => {}
 
-      const result = await BackgroundTaskSessionCancel.cancel(created.claim)
+      const result = await BackgroundTaskSessionCancel.cancel(created.handle)
       expect(result.applied).toBe(true)
       expect(result.info).toBeDefined()
       expect(result.info?.taskID).toBe(created.info.taskID)

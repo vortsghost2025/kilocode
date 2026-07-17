@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test as base } from "bun:test"
 import { Bus } from "../../src/bus"
 import { Identifier } from "../../src/id/id"
 import { BackgroundSubagentStart } from "../../src/kilocode/background-subagent-start"
 import { BackgroundTask } from "../../src/kilocode/background-task"
 import { BackgroundTaskRuntime } from "../../src/kilocode/background-task-runtime"
 import { SubagentSpawn } from "../../src/kilocode/subagent-spawn"
+import { SubagentTaskControl } from "../../src/kilocode/subagent-task-control"
 import { Permission } from "../../src/permission"
 import { Instance } from "../../src/project/instance"
 import { ModelID, ProviderID } from "../../src/provider/schema"
@@ -14,12 +15,23 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { tmpdir } from "../fixture/fixture"
 
+function test(name: string, fn: () => void | Promise<void>) {
+  return base(name, async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({ directory: tmp.path, fn })
+  })
+}
+
 const spawnModule = SubagentSpawn as unknown as {
   prepare: typeof SubagentSpawn.prepare
 }
 
 const runtimeModule = BackgroundTaskRuntime as unknown as {
   start: typeof BackgroundTaskRuntime.start
+}
+
+const controlModule = SubagentTaskControl as unknown as {
+  attachChild: typeof SubagentTaskControl.attachChild
 }
 
 const promptModule = SessionPrompt as unknown as {
@@ -105,7 +117,7 @@ function prepared(): SubagentSpawn.Prepared {
 }
 
 function runtimeResult(info: Partial<BackgroundTask.Info> = {}): RuntimeResult {
-  const taskID = info.taskID ?? "bg_test"
+  const taskID = info.taskID ?? `bg_test_${Identifier.ascending("event")}`
   const generation = info.generation ?? 1
   return {
     info: {
@@ -121,12 +133,20 @@ function runtimeResult(info: Partial<BackgroundTask.Info> = {}): RuntimeResult {
       resultMessageID: info.resultMessageID,
       error: info.error,
     },
-    claim: {
-      taskID,
-      generation,
-      ownerToken: Symbol(taskID),
+    ref: Object.freeze({ taskID, generation }),
+    handle: Object.freeze({}) as SubagentTaskControl.Handle,
+    observer: {
+      activate: () => Promise.resolve(),
+      release: () => true,
     },
   }
+}
+
+function activate(result: RuntimeResult) {
+  const published = SubagentTaskControl.publish(result.handle)
+  expect(published.applied).toBe(true)
+  void result.observer.activate()
+  return result
 }
 
 function withInstance(directory: string, fn: () => Promise<void>) {
@@ -188,12 +208,23 @@ describe("BackgroundSubagentStart", () => {
     }
     const originalPrepare = SubagentSpawn.prepare
     const originalStart = BackgroundTaskRuntime.start
+    const originalAttach = SubagentTaskControl.attachChild
     let args: RuntimeInput | undefined
+    let attached: SubagentTaskControl.Handle | undefined
 
     spawnModule.prepare = async (next) => {
       seen.input = next
       seen.prepare++
+      const tasks = SubagentTaskControl.list({ requesterParentSessionID: input.parentSessionID })
+      expect(tasks).toHaveLength(1)
+      expect(tasks[0].execution).toBe("prepared")
+      expect(tasks[0].child).toBeUndefined()
+      expect(tasks[0].ref.taskID).toStartWith("bg_")
       return gate.promise
+    }
+    controlModule.attachChild = (handle, next) => {
+      attached = handle
+      return originalAttach(handle, next)
     }
     runtimeModule.start = async (next) => {
       args = next
@@ -213,7 +244,9 @@ describe("BackgroundSubagentStart", () => {
 
       const got = await p
       expect(seen.runtime).toBe(1)
-      expect(args?.parentSessionID).toBe(input.parentSessionID)
+      expect(args?.ref.taskID).toStartWith("bg_")
+      expect(args?.ref.taskID).not.toBe(prep.childSessionID)
+      expect(args?.handle).toBe(attached)
       expect(args?.childSessionID).toBe(prep.childSessionID)
       expect(args?.childUserMessageID).toBe(prep.childUserMessageID)
       expect(args?.launch).toBe(prep.launch)
@@ -222,6 +255,7 @@ describe("BackgroundSubagentStart", () => {
     } finally {
       spawnModule.prepare = originalPrepare
       runtimeModule.start = originalStart
+      controlModule.attachChild = originalAttach
     }
   })
 
@@ -248,6 +282,7 @@ describe("BackgroundSubagentStart", () => {
       await expect(BackgroundSubagentStart.start(input)).rejects.toBe(err)
       expect(seen.prepare).toBe(1)
       expect(seen.runtime).toBe(0)
+      expect(SubagentTaskControl.list({ requesterParentSessionID: input.parentSessionID })).toEqual([])
     } finally {
       spawnModule.prepare = originalPrepare
       runtimeModule.start = originalStart
@@ -278,6 +313,7 @@ describe("BackgroundSubagentStart", () => {
       await expect(BackgroundSubagentStart.start(input)).rejects.toBe(err)
       expect(seen.prepare).toBe(1)
       expect(seen.runtime).toBe(1)
+      expect(SubagentTaskControl.list({ requesterParentSessionID: input.parentSessionID })).toEqual([])
     } finally {
       spawnModule.prepare = originalPrepare
       runtimeModule.start = originalStart
@@ -303,15 +339,16 @@ describe("BackgroundSubagentStart", () => {
         async () => {
           expect(await Session.children(parent.id)).toHaveLength(0)
 
-          const out = await BackgroundSubagentStart.start(input)
+          const out = activate(await BackgroundSubagentStart.start(input))
           expect(out.info.status).toBe("running")
           expect(out.info.parentSessionID).toBe(parent.id)
           expect(out.info.childSessionID).toBeDefined()
           expect(out.info.childUserMessageID).toBeDefined()
           expect(out.info.taskID).toBeDefined()
           expect(out.info.taskID).not.toBe(out.info.childSessionID)
-          expect(out.claim.taskID).toBe(out.info.taskID)
-          expect(out.claim.generation).toBe(out.info.generation)
+          expect(out.ref.taskID).toBe(out.info.taskID)
+          expect(out.ref.generation).toBe(out.info.generation)
+          expect(Reflect.ownKeys(out.handle)).toEqual([])
           expect(seen.prompt).toBe(1)
 
           const kids = await Session.children(parent.id)
@@ -346,7 +383,7 @@ describe("BackgroundSubagentStart", () => {
           },
         },
         async () => {
-          const out = await BackgroundSubagentStart.start(input)
+          const out = activate(await BackgroundSubagentStart.start(input))
           expect(out.info.status).toBe("running")
 
           gate.reject(err)
@@ -360,7 +397,7 @@ describe("BackgroundSubagentStart", () => {
     })
   })
 
-  test("resolvePromptParts rejection before TurnOpen rejects with the exact error and leaves one failed task plus the created child session", async () => {
+  test("resolvePromptParts rejection before TurnOpen discards the unpublished task and keeps child history", async () => {
     await using tmp = await tmpdir()
     await withInstance(tmp.path, async () => {
       const { parent, input } = await seed()
@@ -381,22 +418,18 @@ describe("BackgroundSubagentStart", () => {
           await expect(BackgroundSubagentStart.start(input)).rejects.toBe(err)
           expect(seen.prompt).toBe(0)
 
-          const tasks = BackgroundTask.list({ parentSessionID: parent.id })
-          expect(tasks).toHaveLength(1)
-          expect(tasks[0]?.status).toBe("failed")
-          expect(tasks[0]?.startedAt).toBeUndefined()
+          expect(BackgroundTask.list({ parentSessionID: parent.id })).toHaveLength(0)
 
           const kids = await Session.children(parent.id)
           expect(kids).toHaveLength(1)
           const child = await Session.get(kids[0]!.id)
           expect(child.id).toBe(kids[0]!.id)
-          expect(tasks[0]?.childSessionID).toBe(child.id)
         },
       )
     })
   })
 
-  test("synchronous SessionPrompt.prompt throw before TurnOpen rejects with the exact error, fails the registry task, and keeps the child session", async () => {
+  test("synchronous SessionPrompt.prompt throw discards the unpublished task and keeps child history", async () => {
     await using tmp = await tmpdir()
     await withInstance(tmp.path, async () => {
       const { parent, input } = await seed()
@@ -412,10 +445,7 @@ describe("BackgroundSubagentStart", () => {
         async () => {
           await expect(BackgroundSubagentStart.start(input)).rejects.toBe(err)
 
-          const tasks = BackgroundTask.list({ parentSessionID: parent.id })
-          expect(tasks).toHaveLength(1)
-          expect(tasks[0]?.status).toBe("failed")
-          expect(tasks[0]?.startedAt).toBeUndefined()
+          expect(BackgroundTask.list({ parentSessionID: parent.id })).toHaveLength(0)
 
           const kids = await Session.children(parent.id)
           expect(kids).toHaveLength(1)
@@ -455,7 +485,7 @@ describe("BackgroundSubagentStart", () => {
 
           await Bus.publish(Session.Event.TurnOpen, { sessionID: kids[0]!.id })
 
-          const out = await p
+          const out = activate(await p)
           expect(out.info.status).toBe("running")
 
           await Bun.sleep(20)
@@ -518,8 +548,7 @@ describe("BackgroundSubagentStart", () => {
     expect(content).not.toContain("finalText")
     expect(content).not.toContain("cancel")
     expect(content).not.toContain("status")
-    expect(content).not.toContain("try")
-    expect(content).not.toContain("catch")
+    expect(content).toContain("discardUnpublished")
     expect(content).not.toContain("new Promise")
   })
 })

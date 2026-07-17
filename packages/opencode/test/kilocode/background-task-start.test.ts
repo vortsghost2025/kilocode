@@ -7,6 +7,7 @@ import { Session } from "../../src/session"
 import { BackgroundTask } from "../../src/kilocode/background-task"
 import { BackgroundTaskStartAck } from "../../src/kilocode/background-task-start-ack"
 import { BackgroundTaskStart } from "../../src/kilocode/background-task-start"
+import { SubagentTaskControl } from "../../src/kilocode/subagent-task-control"
 import { tmpdir } from "../fixture/fixture"
 
 function sid() {
@@ -19,6 +20,27 @@ function mid() {
 
 function withInstance(directory: string, fn: () => Promise<void>) {
   return Instance.provide({ directory, fn })
+}
+
+type StartInput = Omit<BackgroundTaskStart.Input, "ref" | "handle"> & {
+  parentSessionID: SessionID
+  childUserMessageID: MessageID
+}
+
+function start(input: StartInput) {
+  const task = SubagentTaskControl.create({
+    parentSessionID: input.parentSessionID,
+    agentID: "background",
+    childSessionID: input.childSessionID,
+    childUserMessageID: input.childUserMessageID,
+  })
+  return BackgroundTaskStart.start({
+    ref: task.ref,
+    handle: task.handle,
+    childSessionID: input.childSessionID,
+    launch: input.launch,
+    startupFailure: input.startupFailure,
+  })
 }
 
 afterEach(() => Instance.disposeAll())
@@ -50,7 +72,7 @@ describe("BackgroundTaskStart", () => {
       let launched = false
       const done = defer<void>()
 
-      const p = BackgroundTaskStart.start({
+      const p = start({
         parentSessionID: parent,
         childSessionID: child,
         childUserMessageID: msg,
@@ -73,6 +95,70 @@ describe("BackgroundTaskStart", () => {
     })
   })
 
+  test("task is starting before launch and running only after exact TurnOpen", async () => {
+    await using tmp = await tmpdir()
+    const parent = sid()
+    const child = sid()
+    const msg = mid()
+
+    await withInstance(tmp.path, async () => {
+      const task = SubagentTaskControl.create({
+        parentSessionID: parent,
+        agentID: "background",
+        childSessionID: child,
+        childUserMessageID: msg,
+      })
+      const result = await BackgroundTaskStart.start({
+        ref: task.ref,
+        handle: task.handle,
+        childSessionID: child,
+        launch: () => {
+          expect(SubagentTaskControl.inspect({ requesterParentSessionID: parent, ref: task.ref })?.execution).toBe(
+            "starting",
+          )
+          void Bus.publish(Session.Event.TurnOpen, { sessionID: child })
+        },
+      })
+
+      expect(result.info.status).toBe("running")
+      expect(SubagentTaskControl.inspect({ requesterParentSessionID: parent, ref: task.ref })?.execution).toBe(
+        "running",
+      )
+    })
+  })
+
+  test("cancellation prevents a late TurnOpen from entering running", async () => {
+    await using tmp = await tmpdir()
+    const parent = sid()
+    const child = sid()
+    const msg = mid()
+    const launched = defer<void>()
+
+    await withInstance(tmp.path, async () => {
+      const task = SubagentTaskControl.create({
+        parentSessionID: parent,
+        agentID: "background",
+        childSessionID: child,
+        childUserMessageID: msg,
+      })
+      const pending = BackgroundTaskStart.start({
+        ref: task.ref,
+        handle: task.handle,
+        childSessionID: child,
+        launch: () => launched.resolve(),
+      })
+
+      await launched.promise
+      const cancelled = SubagentTaskControl.transitionToCancelled(task.handle)
+      expect(cancelled.applied).toBe(true)
+      await Bus.publish(Session.Event.TurnOpen, { sessionID: child })
+      await expect(pending).rejects.toThrow("Background task failed to enter running state")
+      expect(SubagentTaskControl.inspect({ requesterParentSessionID: parent, ref: task.ref })?.execution).toBe(
+        "cancelled",
+      )
+    })
+  })
+
   test("launch is invoked exactly once", async () => {
     await using tmp = await tmpdir()
     const parent = sid()
@@ -82,7 +168,7 @@ describe("BackgroundTaskStart", () => {
     await withInstance(tmp.path, async () => {
       let launchCount = 0
 
-      const p = BackgroundTaskStart.start({
+      const p = start({
         parentSessionID: parent,
         childSessionID: child,
         childUserMessageID: msg,
@@ -104,7 +190,7 @@ describe("BackgroundTaskStart", () => {
     const msg = mid()
 
     await withInstance(tmp.path, async () => {
-      const p = BackgroundTaskStart.start({
+      const p = start({
         parentSessionID: parent,
         childSessionID: child,
         childUserMessageID: msg,
@@ -129,7 +215,7 @@ describe("BackgroundTaskStart", () => {
     const msg = mid()
 
     await withInstance(tmp.path, async () => {
-      const p = BackgroundTaskStart.start({
+      const p = start({
         parentSessionID: parent,
         childSessionID: child,
         childUserMessageID: msg,
@@ -165,7 +251,7 @@ describe("BackgroundTaskStart", () => {
     const msg = mid()
 
     await withInstance(tmp.path, async () => {
-      const p = BackgroundTaskStart.start({
+      const p = start({
         parentSessionID: parent,
         childSessionID: child,
         childUserMessageID: msg,
@@ -180,26 +266,32 @@ describe("BackgroundTaskStart", () => {
     })
   })
 
-  test("returned claim is the original registry ownership claim", async () => {
+  test("returns the exact authoritative handle and TaskRef", async () => {
     await using tmp = await tmpdir()
     const parent = sid()
     const child = sid()
     const msg = mid()
 
     await withInstance(tmp.path, async () => {
-      const p = BackgroundTaskStart.start({
+      const task = SubagentTaskControl.create({
         parentSessionID: parent,
+        agentID: "background",
         childSessionID: child,
         childUserMessageID: msg,
+      })
+      const result = await BackgroundTaskStart.start({
+        ref: task.ref,
+        handle: task.handle,
+        childSessionID: child,
         launch: () => {
           void Bus.publish(Session.Event.TurnOpen, { sessionID: child })
         },
       })
 
-      const result = await p
-      expect(typeof result.claim.ownerToken).toBe("symbol")
-      expect(result.claim.taskID).toBe(result.info.taskID)
-      expect(result.claim.generation).toBe(result.info.generation)
+      expect(result.handle).toBe(task.handle)
+      expect(result.ref).toBe(task.ref)
+      expect(result.ref.taskID).toBe(result.info.taskID)
+      expect(result.ref.generation).toBe(result.info.generation)
     })
   })
 
@@ -210,7 +302,7 @@ describe("BackgroundTaskStart", () => {
     const msg = mid()
 
     await withInstance(tmp.path, async () => {
-      const p = BackgroundTaskStart.start({
+      const p = start({
         parentSessionID: parent,
         childSessionID: child,
         childUserMessageID: msg,
@@ -250,7 +342,7 @@ describe("BackgroundTaskStart", () => {
         })
 
         await expect(
-          BackgroundTaskStart.start({
+          start({
             parentSessionID: parent,
             childSessionID: child,
             childUserMessageID: msg,
@@ -267,7 +359,7 @@ describe("BackgroundTaskStart", () => {
         const info = BackgroundTask.list({ parentSessionID: parent })
         expect(info).toHaveLength(1)
         expect(info[0].status).toBe("failed")
-        expect(info[0].startedAt).toBeUndefined()
+        expect(info[0].startedAt).toBeDefined()
         expect(info[0].error?.message).toBe("startup failed")
       } finally {
         Object.defineProperty(BackgroundTask, "transitionToRunning", {
@@ -321,7 +413,7 @@ describe("BackgroundTaskStart", () => {
           writable: true,
         })
 
-        const p = BackgroundTaskStart.start({
+        const p = start({
           parentSessionID: parent,
           childSessionID: child,
           childUserMessageID: msg,
@@ -339,7 +431,7 @@ describe("BackgroundTaskStart", () => {
         const info = BackgroundTask.list({ parentSessionID: parent })
         expect(info).toHaveLength(1)
         expect(info[0].status).toBe("failed")
-        expect(info[0].startedAt).toBeUndefined()
+        expect(info[0].startedAt).toBeDefined()
       } finally {
         Object.defineProperty(Bus, "subscribe", {
           value: origSubscribe,
@@ -365,7 +457,7 @@ describe("BackgroundTaskStart", () => {
       const fail = defer<{ error: unknown }>()
       const err = new Error("failed before open")
 
-      const p = BackgroundTaskStart.start({
+      const p = start({
         parentSessionID: parent,
         childSessionID: child,
         childUserMessageID: msg,
@@ -382,7 +474,7 @@ describe("BackgroundTaskStart", () => {
       const info = BackgroundTask.list({ parentSessionID: parent })
       expect(info).toHaveLength(1)
       expect(info[0].status).toBe("failed")
-      expect(info[0].startedAt).toBeUndefined()
+      expect(info[0].startedAt).toBeDefined()
       expect(info[0].error?.message).toBe("failed before open")
     })
   })
@@ -395,7 +487,7 @@ describe("BackgroundTaskStart", () => {
 
     await withInstance(tmp.path, async () => {
       const fail = defer<{ error: unknown }>()
-      const result = await BackgroundTaskStart.start({
+      const result = await start({
         parentSessionID: parent,
         childSessionID: child,
         childUserMessageID: msg,
@@ -427,7 +519,7 @@ describe("BackgroundTaskStart", () => {
       const boom = new TypeError("launch broke")
 
       await expect(
-        BackgroundTaskStart.start({
+        start({
           parentSessionID: parent,
           childSessionID: child,
           childUserMessageID: msg,
@@ -456,7 +548,7 @@ describe("BackgroundTaskStart", () => {
       const boom = new RangeError("specific error")
 
       try {
-        await BackgroundTaskStart.start({
+        await start({
           parentSessionID: parent,
           childSessionID: child,
           childUserMessageID: msg,
@@ -510,7 +602,7 @@ describe("BackgroundTaskStart", () => {
 
       try {
         await expect(
-          BackgroundTaskStart.start({
+          start({
             parentSessionID: parent,
             childSessionID: child,
             childUserMessageID: msg,

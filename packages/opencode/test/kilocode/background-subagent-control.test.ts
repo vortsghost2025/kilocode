@@ -7,6 +7,7 @@ import { BackgroundTask } from "../../src/kilocode/background-task"
 import { BackgroundTaskRuntime } from "../../src/kilocode/background-task-runtime"
 import { BackgroundTaskSessionCancel } from "../../src/kilocode/background-task-session-cancel"
 import { SubagentSpawn } from "../../src/kilocode/subagent-spawn"
+import { SubagentTaskControl } from "../../src/kilocode/subagent-task-control"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionPrompt } from "../../src/session/prompt"
 import { Bus } from "../../src/bus"
@@ -83,103 +84,69 @@ function makeInfo(overrides: Partial<BackgroundTask.Info> & { parentSessionID: S
   }
 }
 
-function makeClaim(overrides: Partial<BackgroundTask.Claim> & { taskID: string }): BackgroundTask.Claim {
+function makeStarted(parentSessionID = sid()) {
+  const task = SubagentTaskControl.createBackground({ parentSessionID, agentID: "background" })
+  const attached = SubagentTaskControl.attachChild(task.handle, {
+    childSessionID: sid(),
+    childUserMessageID: mid(),
+  })
+  if (!attached.applied || !attached.info) throw new Error("test task attachment failed")
+  const state = { activated: 0, released: 0 }
   return {
-    taskID: overrides.taskID,
-    generation: overrides.generation ?? 1,
-    ownerToken: overrides.ownerToken ?? Symbol(overrides.taskID),
+    info: BackgroundTask.project(attached.info),
+    ref: task.ref,
+    handle: task.handle,
+    observer: {
+      activate() {
+        state.activated++
+        return Promise.resolve()
+      },
+      release() {
+        state.released++
+        return true
+      },
+    },
+    observerState: state,
   }
 }
 
 afterEach(async () => {
-  BackgroundSubagentControl.resetForTests()
   BackgroundTaskRuntime.resetForTests()
   await Instance.disposeAll()
 })
 
 describe("BackgroundSubagentControl", () => {
   describe("start", () => {
-    test("passes the exact input object to BackgroundSubagentStart.start", async () => {
+    test("passes the exact input and publishes the authoritative task", async () => {
       const input = { title: "test" } as unknown as SubagentSpawn.Input
-      const started = {
-        info: makeInfo({ parentSessionID: sid(), taskID: "bg_t1" }),
-        claim: makeClaim({ taskID: "bg_t1" }),
-      }
+      const started = makeStarted()
       const original = BackgroundSubagentStart.start
       let seen: unknown
+      let calls = 0
 
       startModule.start = async (next) => {
         seen = next
-        return started
-      }
-
-      try {
-        await BackgroundSubagentControl.start(input)
-        expect(seen).toBe(input)
-      } finally {
-        startModule.start = original
-      }
-    })
-
-    test("calls BackgroundSubagentStart.start exactly once", async () => {
-      const input = { title: "test" } as unknown as SubagentSpawn.Input
-      const started = {
-        info: makeInfo({ parentSessionID: sid(), taskID: "bg_t2" }),
-        claim: makeClaim({ taskID: "bg_t2" }),
-      }
-      const original = BackgroundSubagentStart.start
-      let calls = 0
-
-      startModule.start = async (_next) => {
         calls++
         return started
       }
 
       try {
-        await BackgroundSubagentControl.start(input)
+        const result = await BackgroundSubagentControl.start(input)
+        expect(seen).toBe(input)
         expect(calls).toBe(1)
+        expect(result.taskID).toBe(started.ref.taskID)
+        expect(result.status).toBe("queued")
+        expect(started.observerState).toEqual({ activated: 1, released: 0 })
+        expect(SubagentTaskControl.discardUnpublished(started.handle)).toBe(false)
       } finally {
         startModule.start = original
       }
     })
 
-    test("stores the exact claim and returns the exact info object by identity", async () => {
-      const parentSessionID = sid()
-      const info = makeInfo({ parentSessionID, taskID: "bg_t3" })
-      const claim = makeClaim({ taskID: "bg_t3" })
-      const started = { info, claim }
-      const original = BackgroundSubagentStart.start
-
-      startModule.start = async (_next) => started
-
-      try {
-        const result = await BackgroundSubagentControl.start({} as SubagentSpawn.Input)
-        expect(result).toBe(info)
-      } finally {
-        startModule.start = original
-      }
-    })
-
-    test("rejection preserves the exact error object", async () => {
+    test("rejection preserves the exact error and retains no control state", async () => {
       const err = new Error("startup failed")
       const original = BackgroundSubagentStart.start
-
-      startModule.start = async (_next) => {
-        throw err
-      }
-
-      try {
-        await expect(BackgroundSubagentControl.start({} as SubagentSpawn.Input)).rejects.toBe(err)
-      } finally {
-        startModule.start = original
-      }
-    })
-
-    test("rejection creates no claim-map ownership and no registry state", async () => {
-      const err = new Error("no state")
-      const original = BackgroundSubagentStart.start
-
-      startModule.start = async (_next) => {
+      startModule.start = async () => {
         throw err
       }
 
@@ -190,6 +157,105 @@ describe("BackgroundSubagentControl", () => {
         startModule.start = original
       }
     })
+  })
+
+  test("publication failure releases the exact pending observer and handle", async () => {
+    const parentSessionID = sid()
+    const childSessionID = sid()
+    const childUserMessageID = mid()
+    const completion = defer<{ resultMessageID: MessageID }>()
+    const originalStart = BackgroundSubagentStart.start
+    let runtime: BackgroundTaskRuntime.Result | undefined
+
+    startModule.start = async () => {
+      const task = SubagentTaskControl.createBackground({ parentSessionID, agentID: "background" })
+      expect(SubagentTaskControl.attachChild(task.handle, { childSessionID, childUserMessageID }).applied).toBe(true)
+      runtime = await BackgroundTaskRuntime.start({
+        ref: task.ref,
+        handle: task.handle,
+        childSessionID,
+        childUserMessageID,
+        launch: () => void Bus.publish(Session.Event.TurnOpen, { sessionID: childSessionID }),
+        completion: completion.promise,
+      })
+      await Instance.dispose()
+      return runtime
+    }
+
+    try {
+      await expect(BackgroundSubagentControl.start({} as SubagentSpawn.Input)).rejects.toThrow(
+        "Background task publication failed",
+      )
+      const result = runtime!
+      expect(SubagentTaskControl.list({ requesterParentSessionID: parentSessionID })).toEqual([])
+      expect(BackgroundTaskRuntime.isObserving(result.ref)).toBe(false)
+      expect(result.observer.release()).toBe(false)
+      expect(result.observer.activate()).toBeUndefined()
+
+      const replacement = SubagentTaskControl.create({
+        taskID: result.ref.taskID,
+        parentSessionID,
+        agentID: "background",
+        childSessionID,
+        childUserMessageID,
+      })
+      await expect(BackgroundSubagentControl.cancel({ parentSessionID, taskID: result.ref.taskID })).rejects.toThrow(
+        `Background task handle unavailable: ${result.ref.taskID}`,
+      )
+
+      const resultMessageID = mid()
+      completion.resolve({ resultMessageID })
+      await completion.promise
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(
+        SubagentTaskControl.inspect({ requesterParentSessionID: parentSessionID, ref: replacement.ref })?.execution,
+      ).toBe("prepared")
+      expect(BackgroundTaskRuntime.isObserving(result.ref)).toBe(false)
+    } finally {
+      startModule.start = originalStart
+    }
+  })
+
+  test("settled completion cannot race failed publication", async () => {
+    const parentSessionID = sid()
+    const childSessionID = sid()
+    const childUserMessageID = mid()
+    const completion = defer<{ resultMessageID: MessageID }>()
+    const originalStart = BackgroundSubagentStart.start
+    let runtime: BackgroundTaskRuntime.Result | undefined
+
+    startModule.start = async () => {
+      const task = SubagentTaskControl.createBackground({ parentSessionID, agentID: "background" })
+      expect(SubagentTaskControl.attachChild(task.handle, { childSessionID, childUserMessageID }).applied).toBe(true)
+      runtime = await BackgroundTaskRuntime.start({
+        ref: task.ref,
+        handle: task.handle,
+        childSessionID,
+        childUserMessageID,
+        launch: () => void Bus.publish(Session.Event.TurnOpen, { sessionID: childSessionID }),
+        completion: completion.promise,
+      })
+      completion.resolve({ resultMessageID: mid() })
+      await completion.promise
+      await Instance.dispose()
+      return runtime
+    }
+
+    try {
+      await expect(BackgroundSubagentControl.start({} as SubagentSpawn.Input)).rejects.toThrow(
+        "Background task publication failed",
+      )
+      expect(SubagentTaskControl.list({ requesterParentSessionID: parentSessionID })).toEqual([])
+      expect(BackgroundTaskRuntime.isObserving(runtime!.ref)).toBe(false)
+      expect(runtime!.observer.activate()).toBeUndefined()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(SubagentTaskControl.list({ requesterParentSessionID: parentSessionID })).toEqual([])
+      expect(BackgroundTaskRuntime.isObserving(runtime!.ref)).toBe(false)
+    } finally {
+      startModule.start = originalStart
+    }
   })
 
   describe("status", () => {
@@ -474,168 +540,113 @@ describe("BackgroundSubagentControl", () => {
   })
 
   describe("cancel", () => {
-    test("uses exact claim returned by startup and calls BackgroundTaskSessionCancel.cancel exactly once", async () => {
+    test("uses the exact retained handle and calls session cancellation once", async () => {
       const parentSessionID = sid()
-      const created = BackgroundTask.create({
-        parentSessionID,
-        childSessionID: sid(),
-        childUserMessageID: mid(),
-        taskID: "bg_c1",
-      })
-      const started = { info: created.info, claim: created.claim }
+      const started = makeStarted(parentSessionID)
       const originalStart = BackgroundSubagentStart.start
-
-      startModule.start = async (_next) => started
-
       const originalCancel = BackgroundTaskSessionCancel.cancel
-      const seen = { claim: undefined as BackgroundTask.Claim | undefined, calls: 0 }
+      let seen: SubagentTaskControl.Handle | undefined
+      let calls = 0
 
-      cancelModule.cancel = async (c) => {
-        seen.calls++
-        seen.claim = c
-        return { applied: true, info: created.info }
+      startModule.start = async () => started
+      cancelModule.cancel = async (handle) => {
+        seen = handle
+        calls++
+        return { applied: true, info: started.info }
       }
 
       try {
         await BackgroundSubagentControl.start({} as SubagentSpawn.Input)
-        const r = await BackgroundSubagentControl.cancel({
+        const result = await BackgroundSubagentControl.cancel({
           parentSessionID,
-          taskID: "bg_c1",
+          taskID: started.ref.taskID,
         })
-        expect(seen.calls).toBe(1)
-        expect(seen.claim).toBe(created.claim)
-        expect(r).toEqual({ applied: true, info: created.info })
+        expect(calls).toBe(1)
+        expect(seen).toBe(started.handle)
+        expect(result).toEqual({ applied: true, info: started.info })
       } finally {
         startModule.start = originalStart
         cancelModule.cancel = originalCancel
       }
     })
 
-    test("returns exact transition result object by identity", async () => {
+    test("returns the exact transition result object", async () => {
       const parentSessionID = sid()
-      const created = BackgroundTask.create({
-        parentSessionID,
-        childSessionID: sid(),
-        childUserMessageID: mid(),
-        taskID: "bg_c2",
-      })
-      const started = { info: created.info, claim: created.claim }
+      const started = makeStarted(parentSessionID)
       const originalStart = BackgroundSubagentStart.start
-      const transitionResult: BackgroundTask.TransitionResult = { applied: true, info: created.info }
-
-      startModule.start = async (_next) => started
-
       const originalCancel = BackgroundTaskSessionCancel.cancel
-      cancelModule.cancel = async (_c) => transitionResult
+      const transition: BackgroundTask.TransitionResult = { applied: true, info: started.info }
+      startModule.start = async () => started
+      cancelModule.cancel = async () => transition
 
       try {
         await BackgroundSubagentControl.start({} as SubagentSpawn.Input)
-        const r = await BackgroundSubagentControl.cancel({
+        const result = await BackgroundSubagentControl.cancel({
           parentSessionID,
-          taskID: "bg_c2",
+          taskID: started.ref.taskID,
         })
-        expect(r).toBe(transitionResult)
+        expect(result).toBe(transition)
       } finally {
         startModule.start = originalStart
         cancelModule.cancel = originalCancel
       }
     })
 
-    test("returns undefined for unknown taskID and never invokes session cancellation", async () => {
+    test("unknown and foreign-parent tasks never invoke session cancellation", async () => {
+      const parentSessionID = sid()
+      const started = makeStarted(parentSessionID)
+      const originalStart = BackgroundSubagentStart.start
       const originalCancel = BackgroundTaskSessionCancel.cancel
-      let cancelCalled = false
-      cancelModule.cancel = async (_c) => {
-        cancelCalled = true
+      let calls = 0
+      startModule.start = async () => started
+      cancelModule.cancel = async () => {
+        calls++
         return { applied: false, info: undefined }
       }
 
       try {
-        const r = await BackgroundSubagentControl.cancel({
-          parentSessionID: sid(),
-          taskID: "nonexistent",
-        })
-        expect(r).toBeUndefined()
-        expect(cancelCalled).toBe(false)
+        await BackgroundSubagentControl.start({} as SubagentSpawn.Input)
+        expect(await BackgroundSubagentControl.cancel({ parentSessionID, taskID: "missing" })).toBeUndefined()
+        expect(
+          await BackgroundSubagentControl.cancel({ parentSessionID: sid(), taskID: started.ref.taskID }),
+        ).toBeUndefined()
+        expect(calls).toBe(0)
       } finally {
+        startModule.start = originalStart
         cancelModule.cancel = originalCancel
       }
     })
 
-    test("returns undefined for parent mismatch and never invokes session cancellation", async () => {
-      const parentA = sid()
-      const parentB = sid()
-      const created = BackgroundTask.create({
-        parentSessionID: parentA,
-        childSessionID: sid(),
-        childUserMessageID: mid(),
-        taskID: "bg_parent_mismatch",
-      })
-
-      const originalCancel = BackgroundTaskSessionCancel.cancel
-      let cancelCalled = false
-      cancelModule.cancel = async (_c) => {
-        cancelCalled = true
-        return { applied: false, info: undefined }
-      }
-
-      try {
-        const r = await BackgroundSubagentControl.cancel({
-          parentSessionID: parentB,
-          taskID: "bg_parent_mismatch",
-        })
-        expect(r).toBeUndefined()
-        expect(cancelCalled).toBe(false)
-      } finally {
-        cancelModule.cancel = originalCancel
-      }
-    })
-
-    test("existing parent-owned task without retained claim throws", async () => {
+    test("existing parent-owned task without a retained handle throws", async () => {
       const parentSessionID = sid()
       BackgroundTask.create({
         parentSessionID,
         childSessionID: sid(),
         childUserMessageID: mid(),
-        taskID: "bg_noclaim",
+        taskID: "bg_nohandle",
       })
 
-      await expect(
-        BackgroundSubagentControl.cancel({
-          parentSessionID,
-          taskID: "bg_noclaim",
-        }),
-      ).rejects.toThrow("Background task claim unavailable: bg_noclaim")
+      await expect(BackgroundSubagentControl.cancel({ parentSessionID, taskID: "bg_nohandle" })).rejects.toThrow(
+        "Background task handle unavailable: bg_nohandle",
+      )
     })
 
     test("repeated cancellation stays idempotent", async () => {
       const parentSessionID = sid()
-      const created = BackgroundTask.create({
-        parentSessionID,
-        childSessionID: sid(),
-        childUserMessageID: mid(),
-        taskID: "bg_idem",
-      })
-      const started = { info: created.info, claim: created.claim }
+      const started = makeStarted(parentSessionID)
       const originalStart = BackgroundSubagentStart.start
-
-      startModule.start = async (_next) => started
-
-      let cancelCount = 0
       const originalCancel = BackgroundTaskSessionCancel.cancel
-      cancelModule.cancel = async (_c) => {
-        cancelCount++
-        const t = BackgroundTask.transitionToCancelled(created.claim)
-        return { applied: t.applied, info: t.info }
-      }
+      startModule.start = async () => started
+      cancelModule.cancel = async (handle) =>
+        BackgroundTask.projectTransition(SubagentTaskControl.transitionToCancelled(handle))
 
       try {
         await BackgroundSubagentControl.start({} as SubagentSpawn.Input)
-        const r1 = await BackgroundSubagentControl.cancel({ parentSessionID, taskID: "bg_idem" })
-        expect(r1!.applied).toBe(true)
-        const r2 = await BackgroundSubagentControl.cancel({ parentSessionID, taskID: "bg_idem" })
-        expect(r2!.applied).toBe(false)
-        expect(cancelCount).toBe(2)
-        expect(BackgroundTask.get("bg_idem")!.status).toBe("cancelled")
+        const first = await BackgroundSubagentControl.cancel({ parentSessionID, taskID: started.ref.taskID })
+        const second = await BackgroundSubagentControl.cancel({ parentSessionID, taskID: started.ref.taskID })
+        expect(first?.applied).toBe(true)
+        expect(second?.applied).toBe(false)
+        expect(BackgroundTask.get(started.ref.taskID)?.status).toBe("cancelled")
       } finally {
         startModule.start = originalStart
         cancelModule.cancel = originalCancel
@@ -644,34 +655,73 @@ describe("BackgroundSubagentControl", () => {
   })
 
   describe("resetForTests", () => {
-    test("removes retained claims but does not alter BackgroundTask registry entries", async () => {
+    test("removes retained handles without altering authoritative entries", async () => {
       const parentSessionID = sid()
-      const created = BackgroundTask.create({
-        parentSessionID,
-        childSessionID: sid(),
-        childUserMessageID: mid(),
-        taskID: "bg_reset",
-      })
-      const started = { info: created.info, claim: created.claim }
+      const started = makeStarted(parentSessionID)
       const originalStart = BackgroundSubagentStart.start
-
-      startModule.start = async (_next) => started
+      startModule.start = async () => started
 
       try {
         await BackgroundSubagentControl.start({} as SubagentSpawn.Input)
-        expect(BackgroundTask.get("bg_reset")).toBeDefined()
-        expect(BackgroundTask.get("bg_reset")!.status).toBe("queued")
-
+        expect(BackgroundTask.get(started.ref.taskID)).toBeDefined()
         BackgroundSubagentControl.resetForTests()
-
-        expect(BackgroundTask.get("bg_reset")).toBeDefined()
-
-        BackgroundTask.transitionToRunning(created.claim)
-        expect(BackgroundTask.get("bg_reset")!.status).toBe("running")
+        expect(BackgroundTask.get(started.ref.taskID)).toBeDefined()
+        await expect(BackgroundSubagentControl.cancel({ parentSessionID, taskID: started.ref.taskID })).rejects.toThrow(
+          `Background task handle unavailable: ${started.ref.taskID}`,
+        )
       } finally {
         startModule.start = originalStart
       }
     })
+  })
+
+  test("temporary handle retention is project-scoped and cleared on disposal", async () => {
+    await using first = await tmpdir()
+    await using second = await tmpdir()
+    const parentSessionID = sid()
+    const originalStart = BackgroundSubagentStart.start
+    let started: ReturnType<typeof makeStarted> | undefined
+
+    startModule.start = async () => {
+      if (!started) throw new Error("test start unavailable")
+      return started
+    }
+
+    try {
+      await Instance.provide({
+        directory: first.path,
+        fn: async () => {
+          started = makeStarted(parentSessionID)
+          await BackgroundSubagentControl.start({} as SubagentSpawn.Input)
+        },
+      })
+      const taskID = started!.ref.taskID
+
+      await Instance.provide({
+        directory: second.path,
+        fn: async () => {
+          expect(await BackgroundSubagentControl.cancel({ parentSessionID, taskID })).toBeUndefined()
+        },
+      })
+
+      await Instance.provide({ directory: first.path, fn: () => Instance.dispose() })
+      await Instance.provide({
+        directory: first.path,
+        fn: async () => {
+          BackgroundTask.create({
+            taskID,
+            parentSessionID,
+            childSessionID: sid(),
+            childUserMessageID: mid(),
+          })
+          await expect(BackgroundSubagentControl.cancel({ parentSessionID, taskID })).rejects.toThrow(
+            `Background task handle unavailable: ${taskID}`,
+          )
+        },
+      })
+    } finally {
+      startModule.start = originalStart
+    }
   })
 
   describe("integration", () => {
@@ -1049,6 +1099,33 @@ describe("BackgroundSubagentControl", () => {
     })
   })
 
+  test("live runtime sources contain no compatibility authority", async () => {
+    const { readFileSync } = await import("fs")
+    const names = [
+      "background-subagent-start.ts",
+      "background-task-start.ts",
+      "background-task-runtime.ts",
+      "background-task-completion.ts",
+      "background-task-cancel.ts",
+      "background-task-session-cancel.ts",
+      "background-subagent-control.ts",
+    ]
+    const banned = [
+      "BackgroundTask.Claim",
+      "CompatibilityClaim",
+      "ownerToken",
+      "compatibilityRunning",
+      "compatibilityCompleted",
+      "compatibilityFailed",
+      "compatibilityCancelled",
+    ]
+
+    for (const name of names) {
+      const content = readFileSync(new URL(`../../src/kilocode/${name}`, import.meta.url), "utf-8")
+      for (const value of banned) expect(content).not.toContain(value)
+    }
+  })
+
   test("production source contains required references and excludes forbidden patterns", async () => {
     const { readFileSync } = await import("fs")
     const content = readFileSync(new URL("../../src/kilocode/background-subagent-control.ts", import.meta.url), "utf-8")
@@ -1057,8 +1134,9 @@ describe("BackgroundSubagentControl", () => {
     expect(content).toContain("BackgroundTask.get")
     expect(content).toContain("MessageV2.get")
     expect(content).toContain("BackgroundTaskSessionCancel.cancel")
-    expect(content).toContain("claims.set")
-    expect(content).toContain("claims.get")
+    expect(content).toContain("handles().set")
+    expect(content).toContain("handles().get")
+    expect(content).not.toContain("claims")
 
     expect(content).not.toContain("Tool.define")
     expect(content).not.toContain("background_task")

@@ -220,6 +220,79 @@ test("keeps execution cleanup and immutable terminal results independent", async
   })
 })
 
+test("generates fresh unpublished background identities and ignores caller-selected IDs", async () => {
+  await using tmp = await tmpdir()
+  await provide(tmp.path, () => {
+    const parentSessionID = sid()
+    const create = SubagentTaskControl.createBackground as unknown as (input: {
+      parentSessionID: SessionID
+      agentID: string
+      taskID?: string
+    }) => SubagentTaskControl.CreateResult
+    const first = create({ parentSessionID, agentID: "general", taskID: "bg_caller_selected" })
+    const second = SubagentTaskControl.createBackground({ parentSessionID, agentID: "general" })
+
+    expect(first.ref.taskID).toStartWith("bg_")
+    expect(first.ref.taskID).not.toBe("bg_caller_selected")
+    expect(second.ref.taskID).toStartWith("bg_")
+    expect(second.ref.taskID).not.toBe(first.ref.taskID)
+    expect(first.info.child).toBeUndefined()
+    expect(first.info.execution).toBe("prepared")
+  })
+})
+
+test("discards only the exact unpublished handle and invalidates late callbacks", async () => {
+  await using first = await tmpdir()
+  await using second = await tmpdir()
+  const parentSessionID = sid()
+  const task = await provide(first.path, () =>
+    SubagentTaskControl.createBackground({ parentSessionID, agentID: "general" }),
+  )
+
+  await provide(second.path, () => {
+    expect(SubagentTaskControl.discardUnpublished(task.handle)).toBe(false)
+  })
+
+  await provide(first.path, () => {
+    const copied = { ...task.handle } as SubagentTaskControl.Handle
+    expect(SubagentTaskControl.discardUnpublished(copied)).toBe(false)
+    expect(SubagentTaskControl.discardUnpublished(task.handle)).toBe(true)
+    expect(SubagentTaskControl.discardUnpublished(task.handle)).toBe(false)
+    expect(SubagentTaskControl.inspect({ requesterParentSessionID: parentSessionID, ref: task.ref })).toBeUndefined()
+    expect(SubagentTaskControl.transitionToFailed(task.handle, { error: new Error("late") }).applied).toBe(false)
+
+    SubagentTaskControl.create({
+      taskID: task.ref.taskID,
+      parentSessionID,
+      agentID: "general",
+    })
+    expect(SubagentTaskControl.discardUnpublished(task.handle)).toBe(false)
+  })
+})
+
+test("published and disposed background tasks cannot be discarded", async () => {
+  await using tmp = await tmpdir()
+  const parentSessionID = sid()
+  const task = await provide(tmp.path, () => {
+    const created = SubagentTaskControl.createBackground({ parentSessionID, agentID: "general" })
+    expect(SubagentTaskControl.publish(created.handle).applied).toBe(false)
+    const attached = SubagentTaskControl.attachChild(created.handle, {
+      childSessionID: sid(),
+      childUserMessageID: mid(),
+    })
+    expect(attached.applied).toBe(true)
+    const published = SubagentTaskControl.publish(created.handle)
+    expect(published.applied).toBe(true)
+    expect(SubagentTaskControl.discardUnpublished(created.handle)).toBe(false)
+    return created
+  })
+
+  await provide(tmp.path, async () => {
+    await Instance.dispose()
+    expect(SubagentTaskControl.discardUnpublished(task.handle)).toBe(false)
+  })
+})
+
 test("projects compatibility views without exposing or sharing authoritative records", async () => {
   await using tmp = await tmpdir()
   await provide(tmp.path, () => {

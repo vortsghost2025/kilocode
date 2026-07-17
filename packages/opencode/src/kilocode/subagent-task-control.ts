@@ -71,6 +71,7 @@ export namespace SubagentTaskControl {
     taskID: TaskID
     generation: number
     ownerToken: symbol
+    published: boolean
     parentSessionID: SessionID
     agentID: string
     childSessionID: SessionID | undefined
@@ -107,6 +108,7 @@ export namespace SubagentTaskControl {
 
   const live = (execution: Execution) => execution === "prepared" || execution === "starting" || execution === "running"
   const makeID = () => `task_${randomUUID()}`
+  const makeBackgroundID = () => `bg_${randomUUID()}`
   const ref = (entry: Entry): TaskRef => Object.freeze({ taskID: entry.taskID, generation: entry.generation })
   const copyFailure = (input: Failure): Readonly<Failure> =>
     Object.freeze({ ...(input.name ? { name: input.name } : {}), message: input.message })
@@ -190,7 +192,7 @@ export namespace SubagentTaskControl {
     return { message: String(input) }
   }
 
-  export function create(input: CreateInput): CreateResult {
+  function insert(input: CreateInput & { published: boolean }): CreateResult {
     const current = state()
     if (current.disposed) throw new Error("Subagent task control state is disposed")
     const taskID = input.taskID ?? makeID()
@@ -211,6 +213,7 @@ export namespace SubagentTaskControl {
       taskID,
       generation: prev ? prev.generation + 1 : 1,
       ownerToken,
+      published: input.published,
       parentSessionID: input.parentSessionID,
       agentID: input.agentID,
       childSessionID: input.childSessionID,
@@ -230,6 +233,39 @@ export namespace SubagentTaskControl {
     const handle = Object.freeze({}) as Handle
     current.handles.set(handle, { taskID, generation: next.generation, ownerToken })
     return { ref: ref(next), handle, info: view(next) }
+  }
+
+  export function create(input: CreateInput): CreateResult {
+    return insert({ ...input, published: true })
+  }
+
+  export function createBackground(input: { parentSessionID: SessionID; agentID: string; now?: number }): CreateResult {
+    return insert({
+      taskID: makeBackgroundID(),
+      parentSessionID: input.parentSessionID,
+      agentID: input.agentID,
+      now: input.now,
+      published: false,
+    })
+  }
+
+  export function publish(handle: Handle) {
+    const current = entry(handle)
+    if (!current) return outcome(false)
+    if (current.published) return outcome(false, current)
+    if (!current.childSessionID || !current.childUserMessageID) return outcome(false, current)
+    current.published = true
+    current.revision++
+    return outcome(true, current)
+  }
+
+  export function discardUnpublished(handle: Handle) {
+    const current = entry(handle)
+    if (!current || current.published) return false
+    const entries = state().entries
+    if (entries.get(current.taskID) !== current) return false
+    entries.delete(current.taskID)
+    return true
   }
 
   export function inspect(input: { requesterParentSessionID: SessionID; ref: TaskRef }) {
