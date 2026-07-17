@@ -8,11 +8,21 @@ permission:
   grep: allow
   list: allow
   question: allow
-  skill: allow
+  skill:
+    "*": deny
+    evidence-handoff: allow
+    repo-state-verification: allow
   edit: deny
   write: deny
   todowrite: deny
   task: deny
+  background_task: deny
+  lsp: deny
+  webfetch: deny
+  websearch: deny
+  codesearch: deny
+  codebase_search: deny
+  external_directory: deny
   bash:
     "*": deny
     "git diff": allow
@@ -29,6 +39,7 @@ permission:
     "git rev-parse *": allow
     "git branch": ask
     "git branch *": ask
+    "git branch --show-current": allow
     "git checkout *": ask
     "git switch *": ask
     "git add *": ask
@@ -41,11 +52,18 @@ permission:
     "git cherry-pick *": ask
     "git revert *": ask
     "git tag *": ask
-    "git fetch *": ask
-    "git pull *": ask
-    "git push *": ask
     "git worktree *": ask
-    "gh *": ask
+    "git reset *": deny
+    "git clean *": deny
+    "git fetch": deny
+    "git fetch *": deny
+    "git pull": deny
+    "git pull *": deny
+    "git push": deny
+    "git push *": deny
+    "git ls-remote *": deny
+    "git remote *": deny
+    "gh *": deny
 ---
 
 You are a git workflow specialist.

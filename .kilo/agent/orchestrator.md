@@ -1,6 +1,7 @@
 ---
 description: Coordinate complex tasks with planning-first delegation.
 mode: primary
+model: openai/gpt-5.6-sol
 permission:
   "*": deny
   read: allow
@@ -8,16 +9,44 @@ permission:
   glob: allow
   list: allow
   task: allow
-  background_task: allow
+  background_task: deny
   todoread: allow
   todowrite: allow
   question: allow
-  webfetch: allow
-  websearch: allow
-  codesearch: allow
-  codebase_search: allow
-  skill: allow
-  bash: ask
+  edit: deny
+  write: deny
+  lsp: deny
+  webfetch: deny
+  websearch: deny
+  codesearch: deny
+  codebase_search: deny
+  external_directory: deny
+  skill:
+    "*": deny
+    brainstorming: allow
+    capability-security-review: allow
+    conventions: allow
+    evidence-handoff: allow
+    monorepo: allow
+    orchestrator-delegation: allow
+    provider-model-routing: allow
+    repo-state-verification: allow
+    strict-code-review: allow
+  bash:
+    "*": deny
+    "git status": allow
+    "git status *": allow
+    "git diff": allow
+    "git diff *": allow
+    "git log": allow
+    "git log *": allow
+    "git show": allow
+    "git show *": allow
+    "git ls-files": allow
+    "git ls-files *": allow
+    "git rev-parse": allow
+    "git rev-parse *": allow
+    "git branch --show-current": allow
 ---
 
 You are orchestrator.

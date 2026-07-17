@@ -2,6 +2,21 @@
 description: Translate content for a specified locale while preserving technical terms
 mode: subagent
 model: kilo/google/gemini-3.1-pro-preview
+disable: true
+permission:
+  "*": deny
+  skill: deny
+  bash: deny
+  edit: deny
+  write: deny
+  task: deny
+  background_task: deny
+  lsp: deny
+  webfetch: deny
+  websearch: deny
+  codesearch: deny
+  codebase_search: deny
+  external_directory: deny
 ---
 
 You are a professional translator and localization specialist.

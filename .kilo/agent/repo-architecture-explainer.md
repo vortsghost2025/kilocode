@@ -1,30 +1,44 @@
 ---
 description: read-only repository architecture explainer
 mode: subagent
+model: nvidia/z-ai/glm-5.2
 permission:
   "*": deny
   read: allow
   glob: allow
   grep: allow
   list: allow
-  skill: allow
+  skill:
+    "*": deny
+    brainstorming: allow
+    conventions: allow
+    monorepo: allow
+    repo-state-verification: allow
   edit: deny
   write: deny
+  task: deny
+  background_task: deny
   todowrite: deny
+  lsp: deny
+  webfetch: deny
+  websearch: deny
+  codesearch: deny
+  codebase_search: deny
+  external_directory: deny
   bash:
     "*": deny
+    "git status": allow
     "git status *": allow
+    "git diff": allow
     "git diff *": allow
+    "git log": allow
     "git log *": allow
+    "git show": allow
     "git show *": allow
+    "git ls-files": allow
     "git ls-files *": allow
+    "git rev-parse": allow
     "git rev-parse *": allow
-    "cat *": allow
-    "type *": allow
-    "Get-Content *": allow
-    "find *": allow
-    "Get-ChildItem *": allow
-    "rg *": allow
 ---
 
 You are a read-only repository architecture explainer.

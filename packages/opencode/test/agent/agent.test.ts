@@ -207,7 +207,14 @@ test("reviewer agent from .kilo/agent/reviewer.md loads with correct read-only p
       expect(evalToolPerm(reviewer, "glob")).toBe("allow")
       expect(evalToolPerm(reviewer, "grep")).toBe("allow")
       expect(evalToolPerm(reviewer, "list")).toBe("allow")
-      expect(evalToolPerm(reviewer, "skill")).toBe("allow")
+      expect(evalToolPerm(reviewer, "skill")).toBe("deny")
+      expect(Permission.evaluate("skill", "baseline-failure-classification", reviewer!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "capability-security-review", reviewer!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "code-review", reviewer!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "conventions", reviewer!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "focused-test-validation", reviewer!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "strict-code-review", reviewer!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "testing", reviewer!.permission).action).toBe("deny")
       expect(evalToolPerm(reviewer, "edit")).toBe("deny")
       expect(evalToolPerm(reviewer, "write")).toBe("deny")
       expect(evalToolPerm(reviewer, "todowrite")).toBe("deny")
@@ -235,13 +242,14 @@ test("command-check agent from .kilo/agent/command-check.md loads with correct r
       expect(evalToolPerm(cc, "glob")).toBe("allow")
       expect(evalToolPerm(cc, "grep")).toBe("allow")
       expect(evalToolPerm(cc, "list")).toBe("allow")
-      expect(evalToolPerm(cc, "skill")).toBe("allow")
+      expect(evalToolPerm(cc, "skill")).toBe("deny")
+      expect(Permission.evaluate("skill", "repo-state-verification", cc!.permission).action).toBe("deny")
       expect(evalToolPerm(cc, "edit")).toBe("deny")
       expect(evalToolPerm(cc, "write")).toBe("deny")
       expect(evalToolPerm(cc, "todowrite")).toBe("deny")
       expect(Permission.evaluate("bash", "git diff HEAD", cc!.permission).action).toBe("allow")
-      expect(Permission.evaluate("bash", "cat foo.txt", cc!.permission).action).toBe("allow")
-      expect(Permission.evaluate("bash", "rg needle src", cc!.permission).action).toBe("allow")
+      expect(Permission.evaluate("bash", "cat foo.txt", cc!.permission).action).toBe("deny")
+      expect(Permission.evaluate("bash", "rg needle src", cc!.permission).action).toBe("deny")
       expect(Permission.evaluate("bash", "bun test test/tool/task.test.ts", cc!.permission).action).toBe("allow")
       expect(Permission.evaluate("bash", "git commit -m x", cc!.permission).action).toBe("deny")
       expect(Permission.evaluate("bash", "git restore foo", cc!.permission).action).toBe("deny")
@@ -266,13 +274,18 @@ test("failing-test-triage agent from .kilo/agent/failing-test-triage.md loads wi
       expect(evalToolPerm(triage, "glob")).toBe("allow")
       expect(evalToolPerm(triage, "grep")).toBe("allow")
       expect(evalToolPerm(triage, "list")).toBe("allow")
-      expect(evalToolPerm(triage, "skill")).toBe("allow")
+      expect(evalToolPerm(triage, "skill")).toBe("deny")
+      expect(Permission.evaluate("skill", "baseline-failure-classification", triage!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "debug", triage!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "focused-test-validation", triage!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "testing", triage!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "conventions", triage!.permission).action).toBe("deny")
       expect(evalToolPerm(triage, "edit")).toBe("deny")
       expect(evalToolPerm(triage, "write")).toBe("deny")
       expect(evalToolPerm(triage, "todowrite")).toBe("deny")
       expect(Permission.evaluate("bash", "git diff HEAD", triage!.permission).action).toBe("allow")
       expect(Permission.evaluate("bash", "bun test test/tool/task.test.ts", triage!.permission).action).toBe("allow")
-      expect(Permission.evaluate("bash", "rg needle src", triage!.permission).action).toBe("allow")
+      expect(Permission.evaluate("bash", "rg needle src", triage!.permission).action).toBe("deny")
       expect(Permission.evaluate("bash", "git commit -m x", triage!.permission).action).toBe("deny")
       expect(Permission.evaluate("bash", "git restore foo", triage!.permission).action).toBe("deny")
       expect(Permission.evaluate("bash", "rm foo.txt", triage!.permission).action).toBe("deny")
@@ -298,15 +311,20 @@ test("repo-architecture-explainer agent loads with correct read-only permissions
       expect(evalToolPerm(rae, "glob")).toBe("allow")
       expect(evalToolPerm(rae, "grep")).toBe("allow")
       expect(evalToolPerm(rae, "list")).toBe("allow")
-      expect(evalToolPerm(rae, "skill")).toBe("allow")
+      expect(evalToolPerm(rae, "skill")).toBe("deny")
+      expect(Permission.evaluate("skill", "brainstorming", rae!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "conventions", rae!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "monorepo", rae!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "repo-state-verification", rae!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "strict-code-review", rae!.permission).action).toBe("deny")
       expect(evalToolPerm(rae, "edit")).toBe("deny")
       expect(evalToolPerm(rae, "write")).toBe("deny")
       expect(evalToolPerm(rae, "todowrite")).toBe("deny")
       expect(Permission.evaluate("bash", "git diff HEAD", rae!.permission).action).toBe("allow")
       expect(Permission.evaluate("bash", "git status", rae!.permission).action).toBe("allow")
       expect(Permission.evaluate("bash", "git log --oneline", rae!.permission).action).toBe("allow")
-      expect(Permission.evaluate("bash", "cat foo.txt", rae!.permission).action).toBe("allow")
-      expect(Permission.evaluate("bash", "rg needle src", rae!.permission).action).toBe("allow")
+      expect(Permission.evaluate("bash", "cat foo.txt", rae!.permission).action).toBe("deny")
+      expect(Permission.evaluate("bash", "rg needle src", rae!.permission).action).toBe("deny")
     },
   })
 })
@@ -350,7 +368,10 @@ test("git-ops agent from .kilo/agent/git-ops.md loads with safe git permissions"
       expect(evalToolPerm(git, "grep")).toBe("allow")
       expect(evalToolPerm(git, "list")).toBe("allow")
       expect(evalToolPerm(git, "question")).toBe("allow")
-      expect(evalToolPerm(git, "skill")).toBe("allow")
+      expect(evalToolPerm(git, "skill")).toBe("deny")
+      expect(Permission.evaluate("skill", "evidence-handoff", git!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "repo-state-verification", git!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "github", git!.permission).action).toBe("deny")
       expect(evalToolPerm(git, "edit")).toBe("deny")
       expect(evalToolPerm(git, "write")).toBe("deny")
       expect(evalToolPerm(git, "todowrite")).toBe("deny")
@@ -361,8 +382,8 @@ test("git-ops agent from .kilo/agent/git-ops.md loads with safe git permissions"
       expect(Permission.evaluate("bash", "git status --short", git!.permission).action).toBe("allow")
       expect(Permission.evaluate("bash", "git add .", git!.permission).action).toBe("ask")
       expect(Permission.evaluate("bash", "git commit -m x", git!.permission).action).toBe("ask")
-      expect(Permission.evaluate("bash", "git push origin main", git!.permission).action).toBe("ask")
-      expect(Permission.evaluate("bash", "gh pr create", git!.permission).action).toBe("ask")
+      expect(Permission.evaluate("bash", "git push origin main", git!.permission).action).toBe("deny")
+      expect(Permission.evaluate("bash", "gh pr create", git!.permission).action).toBe("deny")
       expect(Permission.evaluate("bash", "rm foo.txt", git!.permission).action).toBe("deny")
       expect(Permission.evaluate("bash", "bun test", git!.permission).action).toBe("deny")
     },
@@ -382,11 +403,27 @@ test("orchestrator agent from .kilo/agent/orchestrator.md loads with planning-fi
       const orch = await Agent.get("orchestrator")
       expect(orch).toBeDefined()
       expect(orch?.mode).toBe("primary")
-      expect(evalToolPerm(orch, "skill")).toBe("allow")
+      expect(evalToolPerm(orch, "skill")).toBe("deny")
+      for (const skill of [
+        "brainstorming",
+        "capability-security-review",
+        "conventions",
+        "evidence-handoff",
+        "monorepo",
+        "orchestrator-delegation",
+        "provider-model-routing",
+        "repo-state-verification",
+        "strict-code-review",
+      ]) {
+        expect(Permission.evaluate("skill", skill, orch!.permission).action).toBe("allow")
+      }
+      expect(Permission.evaluate("skill", "testing", orch!.permission).action).toBe("deny")
       expect(evalToolPerm(orch, "task")).toBe("allow")
       expect(evalToolPerm(orch, "todowrite")).toBe("allow")
       expect(evalToolPerm(orch, "edit")).toBe("deny")
-      expect(evalToolPerm(orch, "bash")).toBe("ask")
+      expect(evalToolPerm(orch, "bash")).toBe("deny")
+      expect(Permission.evaluate("bash", "git status", orch!.permission).action).toBe("allow")
+      expect(Permission.evaluate("bash", "git push origin main", orch!.permission).action).toBe("deny")
       expect(orch?.prompt).toContain("brainstorming")
       expect(orch?.prompt).toContain("shared skill now")
     },
@@ -410,7 +447,7 @@ test("background_task repo wiring keeps defaultAgent as code", async () => {
   })
 })
 
-test("background_task repo wiring exposes the custom orchestrator with bash ask and background_task allow", async () => {
+test("background_task repo wiring keeps the configured orchestrator native and background_task denied", async () => {
   await using tmp = await tmpdir({
     git: true,
     config: {
@@ -425,12 +462,13 @@ test("background_task repo wiring exposes the custom orchestrator with bash ask 
       const orch = await Agent.get("orchestrator")
       expect(orch).toBeDefined()
       expect(orch?.mode).toBe("primary")
-      expect(orch?.native).toBe(false)
-      expect(evalToolPerm(orch, "background_task")).toBe("allow")
+      expect(orch?.native).toBe(true)
+      expect(evalToolPerm(orch, "background_task")).toBe("deny")
       expect(evalToolPerm(orch, "task")).toBe("allow")
-      expect(evalToolPerm(orch, "bash")).toBe("ask")
+      expect(evalToolPerm(orch, "bash")).toBe("deny")
+      expect(Permission.evaluate("bash", "git diff", orch!.permission).action).toBe("allow")
       const hidden = Permission.disabled(["background_task"], orch!.permission)
-      expect(hidden.has("background_task")).toBe(false)
+      expect(hidden.has("background_task")).toBe(true)
     },
   })
 })

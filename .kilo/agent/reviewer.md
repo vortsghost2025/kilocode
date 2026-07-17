@@ -1,24 +1,46 @@
 ---
 description: focused read-only diff sanity reviewer
 mode: subagent
+model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
 permission:
   "*": deny
   read: allow
   glob: allow
   grep: allow
   list: allow
-  skill: allow
+  skill:
+    "*": deny
+    baseline-failure-classification: allow
+    capability-security-review: allow
+    code-review: allow
+    conventions: allow
+    focused-test-validation: allow
+    strict-code-review: allow
   edit: deny
   write: deny
+  task: deny
+  background_task: deny
   todowrite: deny
+  lsp: deny
+  webfetch: deny
+  websearch: deny
+  codesearch: deny
+  codebase_search: deny
+  external_directory: deny
   bash:
     "*": deny
+    "git diff": allow
     "git diff *": allow
+    "git status": allow
     "git status *": allow
+    "git log": allow
     "git log *": allow
+    "git show": allow
     "git show *": allow
+    "git ls-files": allow
     "git ls-files *": allow
     "git blame *": allow
+    "git rev-parse": allow
     "git rev-parse *": allow
 ---
 
