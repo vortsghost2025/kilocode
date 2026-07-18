@@ -150,4 +150,102 @@ describe("tool.task", () => {
       },
     })
   })
+
+  // kilocode_change
+  test("releases the subagent type from the in-flight registry when SessionPrompt.prompt throws during a foreground dispatch, allowing re-dispatch in the same session", async () => {
+    await using tmp = await tmpdir({
+      config: {
+        agent: {
+          orchestrator: {},
+          alpha: { mode: "subagent" },
+        },
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const session = await Session.create({})
+        const tool = await TaskTool.init()
+
+        const userMsgId = MessageID.ascending()
+        const asstId = MessageID.ascending()
+
+        await Session.updateMessage({
+          id: userMsgId,
+          role: "user",
+          sessionID: session.id,
+          agent: "orchestrator",
+          model: { providerID: ProviderID.make("openai"), modelID: ModelID.make("gpt-4") },
+          time: { created: Date.now() },
+        })
+        const asstData = {
+          role: "assistant" as const,
+          parentID: userMsgId,
+          sessionID: session.id,
+          agent: "orchestrator",
+          mode: "orchestrator",
+          path: { cwd: Instance.directory, root: Instance.worktree },
+          time: { created: Date.now() },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ModelID.make("gpt-4"),
+          providerID: ProviderID.make("openai"),
+        }
+        await Session.updateMessage({ id: asstId, ...asstData })
+
+        const promptStubThrow = async (_input: any): Promise<any> => {
+          throw new Error("provider down")
+        }
+        const promptStubSuccess = async (_input: any): Promise<any> => {
+          return { parts: [{ type: "text", text: "done" }] }
+        }
+
+        let called = 0
+        let activePrompt: (_input: any) => Promise<any> = promptStubThrow
+        const orig = (SessionPrompt as any).prompt
+        ;(SessionPrompt as any).prompt = async (input: any) => {
+          called++
+          return activePrompt(input)
+        }
+
+        try {
+          const err = await tool
+            .execute({ description: "first", prompt: "first prompt", subagent_type: "alpha" }, {
+              sessionID: session.id,
+              messageID: asstId,
+              agent: "orchestrator",
+              callID: "call-1",
+              abort: new AbortController().signal,
+              async metadata() {},
+              async ask() {},
+            } as any)
+            .then(
+              () => {
+                throw new Error("Expected first dispatch to reject")
+              },
+              (e: unknown) => (e instanceof Error ? e : new Error(String(e))),
+            )
+          expect(err.message).toContain("provider down")
+          expect(called).toBe(1)
+
+          activePrompt = promptStubSuccess
+
+          await tool.execute({ description: "second", prompt: "second prompt", subagent_type: "alpha" }, {
+            sessionID: session.id,
+            messageID: asstId,
+            agent: "orchestrator",
+            callID: "call-2",
+            abort: new AbortController().signal,
+            async metadata() {},
+            async ask() {},
+          } as any)
+          expect(called).toBe(2)
+        } finally {
+          ;(SessionPrompt as any).prompt = orig
+          await Session.remove(session.id)
+        }
+      },
+    })
+  })
 })
