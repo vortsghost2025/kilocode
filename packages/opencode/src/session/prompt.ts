@@ -67,6 +67,10 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 export namespace SessionPrompt {
   // kilocode_change
   export const shouldAskPlanFollowup = KiloSessionPrompt.shouldAskPlanFollowup
+  // kilocode_change start - deprecated tool overrides may only reduce authority
+  export const DEPRECATED_TOOLS_ENABLE_ERROR =
+    "The deprecated tools field may only disable tools and cannot grant permission."
+  // kilocode_change end
 
   const log = Log.create({ service: "session.prompt" })
 
@@ -174,6 +178,11 @@ export namespace SessionPrompt {
   export type PromptInput = z.infer<typeof PromptInput>
 
   export const prompt = fn(PromptInput, async (input) => {
+    // kilocode_change start - fail before any session or message mutation
+    if (Object.values(input.tools ?? {}).some((enabled) => enabled)) {
+      throw new Error(DEPRECATED_TOOLS_ENABLE_ERROR)
+    }
+    // kilocode_change end
     const session = await Session.get(input.sessionID)
     await SessionRevert.cleanup(session)
 
@@ -183,10 +192,10 @@ export namespace SessionPrompt {
     // this is backwards compatibility for allowing `tools` to be specified when
     // prompting
     const permissions: Permission.Ruleset = []
-    for (const [tool, enabled] of Object.entries(input.tools ?? {})) {
+    for (const tool of Object.keys(input.tools ?? {})) {
       permissions.push({
         permission: tool,
-        action: enabled ? "allow" : "deny",
+        action: "deny", // kilocode_change - true values are rejected above
         pattern: "*",
       })
     }

@@ -239,7 +239,7 @@ describe("BackgroundTaskTool", () => {
     }
   })
 
-  test("start rejects unknown agents after the task permission check", async () => {
+  test("start rejects unknown agents after the background and task permission checks", async () => {
     const tool = await BackgroundTaskTool.init()
     const originalConfig = Config.get
     const originalGet = Agent.get
@@ -267,7 +267,7 @@ describe("BackgroundTaskTool", () => {
           }),
         ),
       ).rejects.toThrow("Unknown agent type: missing is not a valid agent type")
-      expect(asks).toBe(1)
+      expect(asks).toBe(2)
     } finally {
       configModule.get = originalConfig
       agentModule.get = originalGet
@@ -303,7 +303,7 @@ describe("BackgroundTaskTool", () => {
     }
   })
 
-  test("start performs the task permission check and forwards sanitized derived input to control.start exactly once", async () => {
+  test("start performs background and task permission checks and forwards sanitized derived input", async () => {
     const tool = await BackgroundTaskTool.init()
     const originalConfig = Config.get
     const originalGet = Agent.get
@@ -387,6 +387,15 @@ describe("BackgroundTaskTool", () => {
       )
 
       expect(calls).toEqual([
+        {
+          permission: "background_task",
+          patterns: ["alpha"],
+          always: ["*"],
+          metadata: {
+            description: "desc",
+            action: "start",
+          },
+        },
         {
           permission: "task",
           patterns: ["alpha"],

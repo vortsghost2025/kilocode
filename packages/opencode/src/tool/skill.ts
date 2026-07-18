@@ -41,19 +41,17 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
     description,
     parameters,
     async execute(params: z.infer<typeof parameters>, ctx) {
-      const skill = await Skill.get(params.name)
-
-      if (!skill) {
-        const available = await Skill.all().then((x) => x.map((skill) => skill.name).join(", "))
-        throw new Error(`Skill "${params.name}" not found. Available skills: ${available || "none"}`)
-      }
-
+      // kilocode_change start - authorize before retrieving protected skill content
       await ctx.ask({
         permission: "skill",
         patterns: [params.name],
         always: [params.name],
         metadata: {},
       })
+
+      const skill = await Skill.get(params.name)
+      if (!skill) throw new Error("Skill not found or unavailable")
+      // kilocode_change end
 
       // kilocode_change start - built-in skills have no filesystem directory
       if (skill.location === Skill.BUILTIN_LOCATION) {

@@ -1563,7 +1563,7 @@ describe("Orchestrator BackgroundTaskTool launch counter", () => {
     }
   })
 
-  test("permission key is task not background_task", async () => {
+  test("task denial blocks after background_task authorization", async () => {
     let startCount = 0
     const BgCtrl = await import("../../../src/kilocode/background-subagent-control").then(
       (m) => m.BackgroundSubagentControl,
@@ -1589,7 +1589,7 @@ describe("Orchestrator BackgroundTaskTool launch counter", () => {
             messages: [],
             metadata: () => {},
             ask: async (input: any) => {
-              // Reject when permission tree denies "task"
+              // background_task is authorized first; the subsequent task denial blocks launch
               const r = Permission.evaluate(input.permission, "*", [
                 { permission: "task", pattern: "*", action: "deny" as const },
               ])
@@ -1611,7 +1611,7 @@ describe("Orchestrator BackgroundTaskTool launch counter", () => {
     }
   })
 
-  test("Real Orchestrator policy allows task so tool reaches BackgroundSubagentControl.start", async () => {
+  test("Real Orchestrator background_task denial blocks before launch", async () => {
     let startCount = 0
     const BgCtrl = await import("../../../src/kilocode/background-subagent-control").then(
       (m) => m.BackgroundSubagentControl,
@@ -1644,13 +1644,13 @@ describe("Orchestrator BackgroundTaskTool launch counter", () => {
           agentPerm = orchestrator!.permission
           const { session, asstId } = await setupBgSession(tmp.path)
           const tool = await BackgroundTaskTool.init()
-          const ctx = bgCtx({ sessionID: session.id, messageID: asstId })
-          const result = await tool.execute(
+          const ctx = bgDenyingCtx({ sessionID: session.id, messageID: asstId })
+          const promise = tool.execute(
             { action: "start", description: "bg task", prompt: "do something", subagent_type: "explore" },
             ctx as any,
           )
-          expect(result.metadata.status).toBeDefined()
-          expect(startCount).toBe(1)
+          await expect(promise).rejects.toThrow("Permission denied")
+          expect(startCount).toBe(0)
         },
       })
     } finally {

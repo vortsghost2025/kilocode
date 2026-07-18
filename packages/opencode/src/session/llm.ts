@@ -23,6 +23,7 @@ import { HEADER_PROJECTID, HEADER_MACHINEID, HEADER_TASKID } from "@kilocode/kil
 import { Identity } from "@kilocode/kilo-telemetry"
 // kilocode_change end
 import { Installation } from "@/installation"
+import { filterResolvedTools } from "@/tool/resolve" // kilocode_change
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -340,16 +341,14 @@ export namespace LLM {
   }
 
   async function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission" | "user">) {
-    const disabled = Permission.disabled(
-      Object.keys(input.tools),
-      Permission.merge(input.agent.permission, input.permission ?? []),
-    )
-    for (const tool of Object.keys(input.tools)) {
-      if (input.user.tools?.[tool] === false || disabled.has(tool)) {
-        delete input.tools[tool]
-      }
-    }
-    return input.tools
+    // kilocode_change start - share the exact production filter with provider-free tests
+    return filterResolvedTools({
+      tools: input.tools,
+      agent: input.agent.permission,
+      session: input.permission,
+      user: input.user.tools,
+    })
+    // kilocode_change end
   }
 
   // Check if messages contain any tool-call content

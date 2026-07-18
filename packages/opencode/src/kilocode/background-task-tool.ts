@@ -185,6 +185,16 @@ export const BackgroundTaskTool = Tool.define("background_task", {
     const config = await Config.get()
 
     await ctx.ask({
+      permission: "background_task",
+      patterns: [params.subagent_type],
+      always: ["*"],
+      metadata: {
+        description: params.description,
+        action: params.action,
+      },
+    })
+
+    await ctx.ask({
       permission: "task",
       patterns: [params.subagent_type],
       always: ["*"],
