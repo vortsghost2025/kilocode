@@ -43,6 +43,17 @@ export const BatchTool = Tool.define("batch", async () => {
       const availableTools = await ToolRegistry.tools({ modelID: ModelID.make(""), providerID: ProviderID.make("") })
       const toolMap = new Map(availableTools.map((t) => [t.id, t]))
 
+      // kilocode_change start — compute catalog-level disabled set from merged agent+session rules
+      const { Agent } = await import("../agent/agent")
+      const callerAgent = ctx.agent ? await Agent.get(ctx.agent) : undefined
+      const callerSession = await Session.get(ctx.sessionID)
+      const mergedRuleset = Permission.merge(callerAgent?.permission ?? [], callerSession.permission ?? [])
+      const hidden = Permission.disabled(
+        params.tool_calls.slice(0, 25).map((c) => c.tool),
+        mergedRuleset,
+      )
+      // kilocode_change end
+
       const executeCall = async (call: (typeof toolCalls)[0]) => {
         const callStartTime = Date.now()
         const partID = PartID.ascending()
@@ -64,12 +75,9 @@ export const BatchTool = Tool.define("batch", async () => {
           const validatedParams = tool.parameters.parse(call.parameters)
 
           // kilocode_change start — enforce merged agent/session permission before invocation
-          await ctx.ask({
-            permission: Permission.permissionForTool(call.tool),
-            patterns: ["*"],
-            always: ["*"],
-            metadata: {},
-          })
+          if (hidden.has(call.tool)) {
+            throw new Permission.DeniedError({ ruleset: mergedRuleset })
+          }
           // kilocode_change end
 
           await Session.updatePart({

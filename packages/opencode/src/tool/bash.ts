@@ -1,5 +1,5 @@
 import z from "zod"
-import { spawn } from "child_process"
+import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "child_process" // kilocode_change
 import { StringDecoder } from "string_decoder" // kilocode_change - fix UTF-8 multi-byte split
 import { Tool } from "./tool"
 import path from "path"
@@ -26,6 +26,17 @@ const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.KILO_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
 
 export const log = Log.create({ service: "bash-tool" })
+
+// kilocode_change start - expose a project-owned process boundary for isolated tests
+export namespace BashProcess {
+  export function spawn(command: string, args: string[], options: SpawnOptions): ChildProcess
+  export function spawn(command: string, options: SpawnOptions): ChildProcess
+  export function spawn(command: string, args: string[] | SpawnOptions, options?: SpawnOptions) {
+    if (Array.isArray(args)) return nodeSpawn(command, args, options ?? {})
+    return nodeSpawn(command, args)
+  }
+}
+// kilocode_change end
 
 const resolveWasm = (asset: string) => {
   if (asset.startsWith("file://")) return fileURLToPath(asset)
@@ -188,7 +199,7 @@ export const BashTool = Tool.define("bash", async () => {
         ? (() => {
             const cfg = resolve(route)
             log.info("bash tool resolved route", { route, shell: cfg.bin })
-            return spawn(cfg.bin, [...cfg.args, cmd], {
+            return BashProcess.spawn(cfg.bin, [...cfg.args, cmd], {
               cwd,
               env: {
                 ...process.env,
@@ -199,7 +210,7 @@ export const BashTool = Tool.define("bash", async () => {
               windowsHide: true, // kilocode_change - prevent CMD window flash on Windows
             })
           })()
-        : spawn(params.command, {
+        : BashProcess.spawn(params.command, {
             shell,
             cwd,
             env: {

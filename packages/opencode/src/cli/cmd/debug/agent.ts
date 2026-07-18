@@ -111,6 +111,20 @@ function parseToolParams(input?: string) {
   return parsed as Record<string, unknown>
 }
 
+// kilocode_change start - expose the production non-interactive permission seam for tests
+export async function debugAsk(
+  req: Omit<Permission.Request, "id" | "sessionID" | "tool">,
+  ruleset: Permission.Ruleset,
+) {
+  for (const pattern of req.patterns) {
+    const rule = Permission.evaluate(req.permission, pattern, ruleset)
+    if (rule.action !== "allow") {
+      throw new Permission.DeniedError({ ruleset })
+    }
+  }
+}
+// kilocode_change end
+
 async function createToolContext(agent: Agent.Info) {
   const session = await Session.create({ title: `Debug tool run (${agent.name})` })
   const messageID = MessageID.ascending()
@@ -157,12 +171,7 @@ async function createToolContext(agent: Agent.Info) {
     metadata: () => {},
     // kilocode_change start — debug runs are non-interactive: fail closed on "ask" instead of silent allow
     async ask(req: Omit<Permission.Request, "id" | "sessionID" | "tool">) {
-      for (const pattern of req.patterns) {
-        const rule = Permission.evaluate(req.permission, pattern, ruleset)
-        if (rule.action !== "allow") {
-          throw new Permission.DeniedError({ ruleset })
-        }
-      }
+      await debugAsk(req, ruleset)
     },
     // kilocode_change end
   }
