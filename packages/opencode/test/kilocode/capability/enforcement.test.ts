@@ -1109,6 +1109,36 @@ describe("Git-Ops BashTool spawn counter", () => {
     })
   })
 
+  test("Denied unrelated shell command: spawn count exactly 0", async () => {
+    const spawnMock = mock(() => ({
+      stdout: { on: () => {} },
+      stderr: { on: () => {} },
+      on: () => {},
+      once: (_e: string, cb: () => void) => {
+        if (_e === "close") setTimeout(cb, 0)
+      },
+      exitCode: 1,
+    }))
+    mock.module("child_process", () => ({ spawn: spawnMock }))
+    await using tmp = await tmpdir({
+      git: true,
+      init: (dir) => copyAgent(dir, "git-ops"),
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { BashTool: MockedBash } = await import("../../../src/tool/bash")
+        const agent = await Agent.get("git-ops")
+        expect(agent).toBeDefined()
+        const ctx = makeDenyingCtx(agent!.permission)
+        const bash = await MockedBash.init()
+        const promise = bash.execute({ command: "npm install", description: "Install deps" }, ctx as any)
+        await expect(promise).rejects.toThrow("Permission denied")
+        expect(spawnMock).toHaveBeenCalledTimes(0)
+      },
+    })
+  })
+
   test("Allowed git status: spawn count exactly 1, exit 0", async () => {
     const spawnMock = mock((cmd: string, opts?: any) => {
       const child = {
@@ -1202,6 +1232,77 @@ describe("Production Permission.ask service path", () => {
           always: ["*"],
           metadata: {},
           ruleset,
+        })
+      },
+    })
+  })
+
+  test("uses real Reviewer resolved policy through Effect service", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      init: (dir) => copyAgent(dir, "reviewer"),
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const reviewer = await Agent.get("reviewer")
+        expect(reviewer).toBeDefined()
+        const session = await Session.create({})
+        const promise = Permission.ask({
+          sessionID: session.id,
+          permission: "edit",
+          patterns: ["src/index.ts"],
+          always: ["*"],
+          metadata: {},
+          ruleset: reviewer!.permission,
+        })
+        await expect(promise).rejects.toThrow()
+      },
+    })
+  })
+
+  test("uses real Git-Ops resolved policy through Effect service", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      init: (dir) => copyAgent(dir, "git-ops"),
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const agent = await Agent.get("git-ops")
+        expect(agent).toBeDefined()
+        const session = await Session.create({})
+        const promise = Permission.ask({
+          sessionID: session.id,
+          permission: "bash",
+          patterns: ["git push origin main"],
+          always: ["*"],
+          metadata: {},
+          ruleset: agent!.permission,
+        })
+        await expect(promise).rejects.toThrow()
+      },
+    })
+  })
+
+  test("uses real Git-Ops policy: allows git status through Effect service", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      init: (dir) => copyAgent(dir, "git-ops"),
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const agent = await Agent.get("git-ops")
+        expect(agent).toBeDefined()
+        const session = await Session.create({})
+        await Permission.ask({
+          sessionID: session.id,
+          permission: "bash",
+          patterns: ["git status --short"],
+          always: ["*"],
+          metadata: {},
+          ruleset: agent!.permission,
         })
       },
     })
@@ -1380,7 +1481,7 @@ describe("Orchestrator BackgroundTaskTool launch counter", () => {
     return { session, asstId }
   }
 
-  function bgCtx(opts: { sessionID: any; messageID: any; deny?: boolean }) {
+  function bgCtx(opts: { sessionID: any; messageID: any }) {
     return {
       sessionID: opts.sessionID,
       messageID: opts.messageID,
@@ -1389,14 +1490,35 @@ describe("Orchestrator BackgroundTaskTool launch counter", () => {
       abort: AbortSignal.any([]),
       messages: [],
       metadata: () => {},
-      ask: opts.deny
-        ? async () => {
-            throw Object.assign(new Error("Permission denied"), { _tag: "PermissionDeniedError" })
-          }
-        : async () => {},
+      ask: async () => {},
       extra: {},
     }
   }
+
+  function bgDenyingCtx(opts: { sessionID: any; messageID: any }) {
+    // Also capture ask calls for inspection
+    const askCalls: any[] = []
+    return {
+      sessionID: opts.sessionID,
+      messageID: opts.messageID,
+      callID: "call-bg",
+      agent: "orchestrator",
+      abort: AbortSignal.any([]),
+      messages: [],
+      metadata: () => {},
+      ask: async (input: any) => {
+        askCalls.push(input)
+        for (const p of input.patterns ?? []) {
+          const r = Permission.evaluate(input.permission, p, agentPerm)
+          if (r.action === "deny")
+            throw Object.assign(new Error("Permission denied"), { _tag: "PermissionDeniedError" })
+        }
+      },
+      extra: {},
+      askCalls,
+    }
+  }
+  let agentPerm: Permission.Ruleset
 
   test("start permitted: BackgroundSubagentControl.start called 1 time", async () => {
     let startCount = 0
@@ -1427,7 +1549,7 @@ describe("Orchestrator BackgroundTaskTool launch counter", () => {
         fn: async () => {
           const { session, asstId } = await setupBgSession(tmp.path)
           const tool = await BackgroundTaskTool.init()
-          const ctx = bgCtx({ sessionID: session.id, messageID: asstId, deny: false })
+          const ctx = bgCtx({ sessionID: session.id, messageID: asstId })
           const result = await tool.execute(
             { action: "start", description: "bg task", prompt: "do something", subagent_type: "explore" },
             ctx as any,
@@ -1441,7 +1563,7 @@ describe("Orchestrator BackgroundTaskTool launch counter", () => {
     }
   })
 
-  test("denied: BackgroundSubagentControl.start not called", async () => {
+  test("permission key is task not background_task", async () => {
     let startCount = 0
     const BgCtrl = await import("../../../src/kilocode/background-subagent-control").then(
       (m) => m.BackgroundSubagentControl,
@@ -1458,13 +1580,77 @@ describe("Orchestrator BackgroundTaskTool launch counter", () => {
         fn: async () => {
           const { session, asstId } = await setupBgSession(tmp.path)
           const tool = await BackgroundTaskTool.init()
-          const ctx = bgCtx({ sessionID: session.id, messageID: asstId, deny: true })
+          const denyAllCtx = {
+            sessionID: session.id,
+            messageID: asstId,
+            callID: "call-bg",
+            agent: "orchestrator",
+            abort: AbortSignal.any([]),
+            messages: [],
+            metadata: () => {},
+            ask: async (input: any) => {
+              // Reject when permission tree denies "task"
+              const r = Permission.evaluate(input.permission, "*", [
+                { permission: "task", pattern: "*", action: "deny" as const },
+              ])
+              if (r.action === "deny")
+                throw Object.assign(new Error("Permission denied"), { _tag: "PermissionDeniedError" })
+            },
+            extra: {},
+          }
           const promise = tool.execute(
             { action: "start", description: "bg task", prompt: "do something", subagent_type: "explore" },
-            ctx as any,
+            denyAllCtx as any,
           )
           await expect(promise).rejects.toThrow("Permission denied")
           expect(startCount).toBe(0)
+        },
+      })
+    } finally {
+      BgCtrl.start = origStart
+    }
+  })
+
+  test("Real Orchestrator policy allows task so tool reaches BackgroundSubagentControl.start", async () => {
+    let startCount = 0
+    const BgCtrl = await import("../../../src/kilocode/background-subagent-control").then(
+      (m) => m.BackgroundSubagentControl,
+    )
+    const origStart = BgCtrl.start
+    BgCtrl.start = async () => {
+      startCount++
+      return {
+        taskID: "bg-test-orch",
+        status: "queued",
+        agent: "explore",
+        ref: { taskID: "bg-test-orch" },
+        error: undefined,
+        prompt: "",
+        model: { providerID: ProviderID.make("openai"), modelID: ModelID.make("gpt-4") },
+        tools: {},
+        permission: [],
+      } as any
+    }
+    try {
+      await using tmp = await tmpdir({
+        git: true,
+        init: (dir) => copyAgent(dir, "orchestrator"),
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const orchestrator = await Agent.get("orchestrator")
+          expect(orchestrator).toBeDefined()
+          agentPerm = orchestrator!.permission
+          const { session, asstId } = await setupBgSession(tmp.path)
+          const tool = await BackgroundTaskTool.init()
+          const ctx = bgCtx({ sessionID: session.id, messageID: asstId })
+          const result = await tool.execute(
+            { action: "start", description: "bg task", prompt: "do something", subagent_type: "explore" },
+            ctx as any,
+          )
+          expect(result.metadata.status).toBeDefined()
+          expect(startCount).toBe(1)
         },
       })
     } finally {
