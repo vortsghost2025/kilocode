@@ -1,7 +1,7 @@
 ---
 description: Coordinate complex tasks with planning-first delegation.
 mode: primary
-model: openai/gpt-5.6-sol
+model: nvidia/z-ai/glm-5.2
 permission:
   "*": deny
   read: allow
@@ -94,3 +94,4 @@ If a delegated task returns garbage (serialized tool-call JSON, hallucinated pat
 2. Delegate to a different-model subagent instead. Prefer `repo-architecture-explainer` (glm-5.2) as the first fallback for any type.
 3. If the fallback also fails, handle the task directly yourself.
 4. Log which subagent+model failed so you avoid repeating the same combination.
+
