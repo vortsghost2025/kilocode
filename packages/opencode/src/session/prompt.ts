@@ -192,13 +192,15 @@ export namespace SessionPrompt {
     // this is backwards compatibility for allowing `tools` to be specified when
     // prompting
     const permissions: Permission.Ruleset = []
+    // kilocode_change start - deprecated tool overrides are deny-only
     for (const tool of Object.keys(input.tools ?? {})) {
       permissions.push({
         permission: tool,
-        action: "deny", // kilocode_change - true values are rejected above
+        action: "deny",
         pattern: "*",
       })
     }
+    // kilocode_change end
     if (permissions.length > 0) {
       session.permission = permissions
       await Session.setPermission({ sessionID: session.id, permission: permissions })
