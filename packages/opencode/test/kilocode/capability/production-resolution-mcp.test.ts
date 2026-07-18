@@ -7,6 +7,11 @@ import { MCPToolResolution } from "../../../src/kilocode/mcp-tool-resolution"
 import { MCP } from "../../../src/mcp"
 import { Permission } from "../../../src/permission"
 import { Instance } from "../../../src/project/instance"
+import { Provider } from "../../../src/provider/provider"
+import { ModelID, ProviderID } from "../../../src/provider/schema"
+import { Session } from "../../../src/session"
+import { SessionPrompt } from "../../../src/session/prompt"
+import { MessageID } from "../../../src/session/schema"
 import { resetDatabase } from "../../fixture/db"
 import { tmpdir } from "../../fixture/fixture"
 
@@ -56,17 +61,86 @@ function client(list: () => void) {
   } as never
 }
 
+function model(): Provider.Model {
+  return {
+    id: ModelID.make("test-model"),
+    providerID: ProviderID.make("test-provider"),
+    api: { id: "test-model", url: "http://127.0.0.1", npm: "@ai-sdk/anthropic" },
+    name: "Test model",
+    capabilities: {
+      temperature: true,
+      reasoning: false,
+      attachment: false,
+      toolcall: true,
+      input: { text: true, audio: false, image: false, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: { context: 10_000, output: 1_000 },
+    status: "active",
+    options: {},
+    headers: {},
+    release_date: "2026-01-01",
+  }
+}
+
+function boundaries() {
+  const calls = {
+    list: 0,
+    stdio: [] as string[],
+    http: [] as string[],
+    sse: [] as string[],
+  }
+  const all = spyOn(MCP, "tools")
+  const scoped = spyOn(MCP, "toolsForServers")
+  const clients = spyOn(MCP.Boundary, "client").mockImplementation(() =>
+    client(() => {
+      calls.list++
+    }),
+  )
+  const stdio = spyOn(MCP.Boundary, "stdio").mockImplementation((options) => {
+    calls.stdio.push(options.command)
+    return transport()
+  })
+  const stream = spyOn(MCP.Boundary, "stream").mockImplementation((url) => {
+    calls.http.push(url.toString())
+    return transport()
+  })
+  const sse = spyOn(MCP.Boundary, "sse").mockImplementation((url) => {
+    calls.sse.push(url.toString())
+    return transport()
+  })
+  return {
+    calls,
+    all,
+    scoped,
+    clients,
+    stdio,
+    stream,
+    sse,
+    restore() {
+      all.mockRestore()
+      scoped.mockRestore()
+      clients.mockRestore()
+      stdio.mockRestore()
+      stream.mockRestore()
+      sse.mockRestore()
+    },
+  }
+}
+
 afterEach(async () => {
   await resetDatabase()
 })
 
-test("denied role resolves zero MCP tools without constructing runtime boundaries", async () => {
+test("all denied namespaces resolve zero MCP tools without runtime construction", async () => {
   await using tmp = await tmpdir({
     init: copy,
     config: {
       mcp: {
-        local: { type: "local", command: ["never-run"] },
-        remote: { type: "remote", url: "https://127.0.0.1:1" },
+        "blocked-local": { type: "local", command: ["blocked-local-never-run"] },
+        "blocked-remote": { type: "remote", url: "https://127.0.0.1:1" },
       },
     },
   })
@@ -76,44 +150,32 @@ test("denied role resolves zero MCP tools without constructing runtime boundarie
       const agent = await Agent.get("freeprobe")
       expect(agent).toBeDefined()
 
-      const tools = spyOn(MCP, "tools")
-      const client = spyOn(MCP.Boundary, "client").mockImplementation(() => {
-        throw new Error("MCP client boundary must not initialize")
-      })
-      const stdio = spyOn(MCP.Boundary, "stdio").mockImplementation(() => {
-        throw new Error("MCP stdio boundary must not initialize")
-      })
-      const stream = spyOn(MCP.Boundary, "stream").mockImplementation(() => {
-        throw new Error("MCP HTTP boundary must not initialize")
-      })
-      const sse = spyOn(MCP.Boundary, "sse").mockImplementation(() => {
-        throw new Error("MCP SSE boundary must not initialize")
-      })
+      const boundary = boundaries()
       try {
         const result = await MCPToolResolution.resolve(agent!.permission)
         expect(result).toEqual({})
-        expect(tools).toHaveBeenCalledTimes(0)
-        expect(client).toHaveBeenCalledTimes(0)
-        expect(stdio).toHaveBeenCalledTimes(0)
-        expect(stream).toHaveBeenCalledTimes(0)
-        expect(sse).toHaveBeenCalledTimes(0)
+        expect(boundary.all).toHaveBeenCalledTimes(0)
+        expect(boundary.scoped).toHaveBeenCalledTimes(0)
+        expect(boundary.clients).toHaveBeenCalledTimes(0)
+        expect(boundary.calls.stdio).toEqual([])
+        expect(boundary.calls.http).toEqual([])
+        expect(boundary.calls.sse).toEqual([])
+        expect(boundary.calls.list).toBe(0)
       } finally {
         await Instance.dispose()
-        tools.mockRestore()
-        client.mockRestore()
-        stdio.mockRestore()
-        stream.mockRestore()
-        sse.mockRestore()
+        boundary.restore()
       }
     },
   })
 })
 
-test("allowed synthetic role initializes actual MCP.tools boundary once", async () => {
+test("mixed configuration initializes only the allowed synthetic server", async () => {
   await using tmp = await tmpdir({
     config: {
       mcp: {
-        synthetic: { type: "local", command: ["never-run"] },
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+        blocked: { type: "local", command: ["blocked-never-run"] },
+        remote: { type: "remote", url: "https://127.0.0.1:1" },
       },
     },
   })
@@ -124,36 +186,111 @@ test("allowed synthetic role initializes actual MCP.tools boundary once", async 
         { permission: "*", pattern: "*", action: "deny" },
         { permission: "synthetic_search", pattern: "*", action: "allow" },
       ]
-      const tools = spyOn(MCP, "tools")
-      const stdio = spyOn(MCP.Boundary, "stdio").mockReturnValue(transport())
-      const stream = spyOn(MCP.Boundary, "stream").mockImplementation(() => {
-        throw new Error("Synthetic local server must not construct HTTP transport")
-      })
-      const sse = spyOn(MCP.Boundary, "sse").mockImplementation(() => {
-        throw new Error("Synthetic local server must not construct SSE transport")
-      })
-      const counts = { list: 0 }
-      const clients = spyOn(MCP.Boundary, "client").mockReturnValue(
-        client(() => {
-          counts.list++
-        }),
-      )
+      const boundary = boundaries()
       try {
         const result = await MCPToolResolution.resolve(ruleset)
         expect(Object.keys(result)).toEqual(["synthetic_search"])
-        expect(tools).toHaveBeenCalledTimes(1)
-        expect(clients).toHaveBeenCalledTimes(1)
-        expect(stdio).toHaveBeenCalledTimes(1)
-        expect(stream).toHaveBeenCalledTimes(0)
-        expect(sse).toHaveBeenCalledTimes(0)
-        expect(counts.list).toBe(1)
+        expect(boundary.all).toHaveBeenCalledTimes(0)
+        expect(boundary.scoped).toHaveBeenCalledTimes(1)
+        expect(boundary.scoped).toHaveBeenCalledWith(["synthetic"])
+        expect(boundary.clients).toHaveBeenCalledTimes(1)
+        expect(boundary.calls.stdio).toEqual(["synthetic-never-run"])
+        expect(boundary.calls.stdio.filter((command) => command === "blocked-never-run")).toHaveLength(0)
+        expect(boundary.calls.http).toEqual([])
+        expect(boundary.calls.sse).toEqual([])
+        expect(boundary.calls.list).toBe(1)
       } finally {
         await Instance.dispose()
-        tools.mockRestore()
-        clients.mockRestore()
-        stdio.mockRestore()
-        stream.mockRestore()
-        sse.mockRestore()
+        boundary.restore()
+      }
+    },
+  })
+})
+
+test("parameter-specific MCP allowance initializes only its server", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: {
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+        blocked: { type: "local", command: ["blocked-never-run"] },
+        remote: { type: "remote", url: "https://127.0.0.1:1" },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const ruleset: Permission.Ruleset = [
+        { permission: "*", pattern: "*", action: "deny" },
+        { permission: "synthetic_search", pattern: "safe-query", action: "allow" },
+      ]
+      const boundary = boundaries()
+      try {
+        const result = await MCPToolResolution.resolve(ruleset)
+        expect(Object.keys(result)).toEqual(["synthetic_search"])
+        expect(boundary.scoped).toHaveBeenCalledWith(["synthetic"])
+        expect(boundary.clients).toHaveBeenCalledTimes(1)
+        expect(boundary.calls.stdio).toEqual(["synthetic-never-run"])
+        expect(boundary.calls.stdio).not.toContain("blocked-never-run")
+        expect(boundary.calls.http).toEqual([])
+        expect(boundary.calls.sse).toEqual([])
+        expect(boundary.calls.list).toBe(1)
+      } finally {
+        await Instance.dispose()
+        boundary.restore()
+      }
+    },
+  })
+})
+
+test("SessionPrompt production path merges agent and session MCP permissions", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: {
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+        blocked: { type: "local", command: ["blocked-never-run"] },
+        remote: { type: "remote", url: "https://127.0.0.1:1" },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const agent: Agent.Info = {
+        name: "synthetic",
+        mode: "primary",
+        options: {},
+        permission: [{ permission: "*", pattern: "*", action: "deny" }],
+      }
+      const session = await Session.create({
+        permission: [{ permission: "synthetic_search", pattern: "*", action: "allow" }],
+      })
+      const boundary = boundaries()
+      try {
+        const result = await SessionPrompt.resolveTools({
+          agent,
+          session,
+          model: model(),
+          processor: {
+            message: { id: MessageID.ascending() },
+            partFromToolCall() {},
+          } as never,
+          bypassAgentCheck: false,
+          messages: [],
+        })
+        expect(result.synthetic_search).toBeDefined()
+        expect(result.blocked_search).toBeUndefined()
+        expect(result.remote_search).toBeUndefined()
+        expect(boundary.scoped).toHaveBeenCalledWith(["synthetic"])
+        expect(boundary.clients).toHaveBeenCalledTimes(1)
+        expect(boundary.calls.stdio).toEqual(["synthetic-never-run"])
+        expect(boundary.calls.stdio).not.toContain("blocked-never-run")
+        expect(boundary.calls.http).toEqual([])
+        expect(boundary.calls.sse).toEqual([])
+        expect(boundary.calls.list).toBe(1)
+      } finally {
+        await Instance.dispose()
+        boundary.restore()
       }
     },
   })

@@ -24,17 +24,21 @@ export namespace MCPToolResolution {
 
     return ruleset.slice(index + 1).some((rule) => {
       if (rule.action === "deny") return false
-      if (!Wildcard.match("*", rule.pattern)) return false
       return targets(prefix, rule.permission)
     })
   }
 
-  export async function resolve(ruleset: Permission.Ruleset): Promise<Record<string, Tool>> {
+  export async function servers(ruleset: Permission.Ruleset) {
     const cfg = await Config.get()
-    const servers = Object.entries(cfg.mcp ?? {})
+    return Object.entries(cfg.mcp ?? {})
       .filter(([, entry]) => typeof entry === "object" && entry !== null && "type" in entry && entry.enabled !== false)
       .map(([name]) => name)
-    if (!servers.some((name) => allowed(name, ruleset))) return {}
-    return MCP.tools()
+      .filter((name) => allowed(name, ruleset))
+  }
+
+  export async function resolve(ruleset: Permission.Ruleset): Promise<Record<string, Tool>> {
+    const names = await servers(ruleset)
+    if (names.length === 0) return {}
+    return MCP.toolsForServers(names)
   }
 }

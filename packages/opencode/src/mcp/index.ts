@@ -33,7 +33,7 @@ import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import open from "open"
-import { Effect, Exit, Layer, Option, ServiceMap, Stream } from "effect"
+import { Deferred, Effect, Exit, Layer, Option, ServiceMap, Stream } from "effect" // kilocode_change
 import { InstanceState } from "@/effect/instance-state"
 import { makeRuntime } from "@/effect/run-service"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -253,12 +253,15 @@ export namespace MCP {
     status: Record<string, Status>
     clients: Record<string, MCPClient>
     defs: Record<string, MCPToolDef[]>
+    ready: Set<string> // kilocode_change
+    pending: Map<string, Deferred.Deferred<void>> // kilocode_change
   }
 
   export interface Interface {
     readonly status: () => Effect.Effect<Record<string, Status>>
     readonly clients: () => Effect.Effect<Record<string, MCPClient>>
     readonly tools: () => Effect.Effect<Record<string, Tool>>
+    readonly toolsForServers: (names: string[]) => Effect.Effect<Record<string, Tool>> // kilocode_change
     readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
     readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
     readonly add: (name: string, mcp: Config.Mcp) => Effect.Effect<{ status: Record<string, Status> | Status }>
@@ -528,40 +531,13 @@ export namespace MCP {
 
       const cache = yield* InstanceState.make<State>(
         Effect.fn("MCP.state")(function* () {
-          const cfg = yield* cfgSvc.get()
-          const config = cfg.mcp ?? {}
           const s: State = {
             status: {},
             clients: {},
             defs: {},
+            ready: new Set(), // kilocode_change
+            pending: new Map(), // kilocode_change
           }
-
-          yield* Effect.forEach(
-            Object.entries(config),
-            ([key, mcp]) =>
-              Effect.gen(function* () {
-                if (!isMcpConfigured(mcp)) {
-                  log.error("Ignoring MCP config entry without type", { key })
-                  return
-                }
-
-                if (mcp.enabled === false) {
-                  s.status[key] = { status: "disabled" }
-                  return
-                }
-
-                const result = yield* create(key, mcp).pipe(Effect.catch(() => Effect.succeed(undefined)))
-                if (!result) return
-
-                s.status[key] = result.status
-                if (result.mcpClient) {
-                  s.clients[key] = result.mcpClient
-                  s.defs[key] = result.defs!
-                  watch(s, key, result.mcpClient, mcp.timeout)
-                }
-              }),
-            { concurrency: "unbounded" },
-          )
 
           yield* Effect.addFinalizer(() =>
             Effect.gen(function* () {
@@ -590,6 +566,64 @@ export namespace MCP {
         }),
       )
 
+      // kilocode_change start - lazily initialize only selected server namespaces in the shared cache
+      const configured = Effect.fnUntraced(function* () {
+        const cfg = yield* cfgSvc.get()
+        return Object.entries(cfg.mcp ?? {})
+          .filter(([, mcp]) => isMcpConfigured(mcp))
+          .map(([name]) => name)
+      })
+
+      const ensureServer = Effect.fnUntraced(function* (s: State, name: string) {
+        if (s.ready.has(name)) return
+        const active = s.pending.get(name)
+        if (active) {
+          yield* Deferred.await(active)
+          return
+        }
+
+        const deferred = yield* Deferred.make<void>()
+        s.pending.set(name, deferred)
+        yield* Effect.gen(function* () {
+          const cfg = yield* cfgSvc.get()
+          const mcp = cfg.mcp?.[name]
+          if (!mcp || !isMcpConfigured(mcp)) {
+            log.error("Ignoring MCP config entry without type", { key: name })
+            s.ready.add(name)
+            return
+          }
+
+          if (mcp.enabled === false) {
+            s.status[name] = { status: "disabled" }
+            s.ready.add(name)
+            return
+          }
+
+          const result = yield* create(name, mcp).pipe(Effect.catch(() => Effect.succeed(undefined)))
+          if (result) {
+            s.status[name] = result.status
+            if (result.mcpClient) {
+              s.clients[name] = result.mcpClient
+              s.defs[name] = result.defs!
+              watch(s, name, result.mcpClient, mcp.timeout)
+            }
+          }
+          s.ready.add(name)
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              s.pending.delete(name)
+              yield* Deferred.succeed(deferred, undefined)
+            }),
+          ),
+        )
+      })
+
+      const ensureServers = Effect.fnUntraced(function* (s: State, names: string[]) {
+        yield* Effect.forEach([...new Set(names)], (name) => ensureServer(s, name), { concurrency: "unbounded" })
+      })
+      // kilocode_change end
+
       function closeClient(s: State, name: string) {
         const client = s.clients[name]
         delete s.defs[name]
@@ -599,6 +633,7 @@ export namespace MCP {
 
       const status = Effect.fn("MCP.status")(function* () {
         const s = yield* InstanceState.get(cache)
+        yield* ensureServers(s, yield* configured()) // kilocode_change
 
         const cfg = yield* cfgSvc.get()
         const config = cfg.mcp ?? {}
@@ -614,6 +649,7 @@ export namespace MCP {
 
       const clients = Effect.fn("MCP.clients")(function* () {
         const s = yield* InstanceState.get(cache)
+        yield* ensureServers(s, yield* configured()) // kilocode_change
         return s.clients
       })
 
@@ -622,6 +658,7 @@ export namespace MCP {
         const result = yield* create(name, mcp)
 
         s.status[name] = result.status
+        s.ready.add(name) // kilocode_change
         if (!result.mcpClient) {
           yield* closeClient(s, name)
           delete s.clients[name]
@@ -655,18 +692,22 @@ export namespace MCP {
         yield* closeClient(s, name)
         delete s.clients[name]
         s.status[name] = { status: "disabled" }
+        s.ready.add(name) // kilocode_change
       })
 
-      const tools = Effect.fn("MCP.tools")(function* () {
+      // kilocode_change start - ensure and expose only the requested server namespaces
+      const toolsForServers = Effect.fn("MCP.toolsForServers")(function* (names: string[]) {
         const result: Record<string, Tool> = {}
         const s = yield* InstanceState.get(cache)
+        yield* ensureServers(s, names)
 
         const cfg = yield* cfgSvc.get()
         const config = cfg.mcp ?? {}
         const defaultTimeout = cfg.experimental?.mcp_timeout
+        const selected = new Set(names)
 
         const connectedClients = Object.entries(s.clients).filter(
-          ([clientName]) => s.status[clientName]?.status === "connected",
+          ([clientName]) => selected.has(clientName) && s.status[clientName]?.status === "connected",
         )
 
         yield* Effect.forEach(
@@ -692,6 +733,13 @@ export namespace MCP {
         return result
       })
 
+      const tools = Effect.fn("MCP.tools")(function* () {
+        const s = yield* InstanceState.get(cache)
+        const names = [...(yield* configured()), ...Object.keys(s.clients)]
+        return yield* toolsForServers(names)
+      })
+      // kilocode_change end
+
       function collectFromConnected<T extends { name: string }>(
         s: State,
         listFn: (c: Client) => Promise<T[]>,
@@ -707,11 +755,13 @@ export namespace MCP {
 
       const prompts = Effect.fn("MCP.prompts")(function* () {
         const s = yield* InstanceState.get(cache)
+        yield* ensureServers(s, yield* configured()) // kilocode_change
         return yield* collectFromConnected(s, (c) => c.listPrompts().then((r) => r.prompts), "prompts")
       })
 
       const resources = Effect.fn("MCP.resources")(function* () {
         const s = yield* InstanceState.get(cache)
+        yield* ensureServers(s, yield* configured()) // kilocode_change
         return yield* collectFromConnected(s, (c) => c.listResources().then((r) => r.resources), "resources")
       })
 
@@ -722,6 +772,7 @@ export namespace MCP {
         meta?: Record<string, unknown>,
       ) {
         const s = yield* InstanceState.get(cache)
+        yield* ensureServers(s, [clientName]) // kilocode_change
         const client = s.clients[clientName]
         if (!client) {
           log.warn(`client not found for ${label}`, { clientName })
@@ -902,6 +953,7 @@ export namespace MCP {
         status,
         clients,
         tools,
+        toolsForServers, // kilocode_change
         prompts,
         resources,
         add,
@@ -941,6 +993,8 @@ export namespace MCP {
   export const clients = async () => runPromise((svc) => svc.clients())
 
   export const tools = async () => runPromise((svc) => svc.tools())
+
+  export const toolsForServers = async (names: string[]) => runPromise((svc) => svc.toolsForServers(names)) // kilocode_change
 
   export const prompts = async () => runPromise((svc) => svc.prompts())
 
