@@ -8,9 +8,31 @@ export namespace MCPToolResolution {
   const sanitize = (name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "_")
 
   function targets(prefix: string, permission: string) {
-    if (!permission.includes("*")) return permission.startsWith(prefix)
-    const base = permission.slice(0, permission.indexOf("*"))
-    return base.length === 0 || prefix.startsWith(base) || base.startsWith(prefix)
+    if (!/[*?]/.test(permission)) return permission.startsWith(prefix)
+    for (const suffix of ["", "search", "tool", "x", "__kilo_mcp_probe__"]) {
+      if (Wildcard.match(prefix + suffix, permission)) return true
+    }
+
+    const wildcard = permission.search(/[*?]/)
+    const base = permission.slice(0, wildcard)
+    if (base && !prefix.startsWith(base) && !base.startsWith(prefix)) return false
+    return true
+  }
+
+  function covers(cover: string, target: string) {
+    if (cover === "*" || cover === target) return true
+    if (/[*?]/.test(target)) return false
+    return Wildcard.match(target, cover)
+  }
+
+  function superseded(ruleset: Permission.Ruleset, index: number) {
+    const rule = ruleset[index]
+    return ruleset
+      .slice(index + 1)
+      .some(
+        (next) =>
+          next.action === "deny" && covers(next.permission, rule.permission) && covers(next.pattern, rule.pattern),
+      )
   }
 
   export function allowed(name: string, ruleset: Permission.Ruleset) {
@@ -22,9 +44,10 @@ export namespace MCPToolResolution {
     if (index === -1) return true
     if (ruleset[index].action !== "deny") return true
 
-    return ruleset.slice(index + 1).some((rule) => {
+    return ruleset.slice(index + 1).some((rule, offset) => {
       if (rule.action === "deny") return false
-      return targets(prefix, rule.permission)
+      if (!targets(prefix, rule.permission)) return false
+      return !superseded(ruleset, index + offset + 1)
     })
   }
 

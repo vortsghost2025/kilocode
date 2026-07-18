@@ -34,7 +34,7 @@ function transport() {
   } as never
 }
 
-function client(list: () => void) {
+function client(list: () => void | Promise<void>, close = () => {}, tool = "search") {
   const state: { transport?: unknown } = {}
   return {
     get transport() {
@@ -45,11 +45,11 @@ function client(list: () => void) {
       await value.start()
     },
     async listTools() {
-      list()
+      await list()
       return {
         tools: [
           {
-            name: "search",
+            name: tool,
             description: "Synthetic search",
             inputSchema: { type: "object", properties: {} },
           },
@@ -57,8 +57,23 @@ function client(list: () => void) {
       }
     },
     setNotificationHandler() {},
-    async close() {},
+    async close() {
+      close()
+    },
   } as never
+}
+
+function signal() {
+  const state: { resolve?: () => void } = {}
+  const promise = new Promise<void>((resolve) => {
+    state.resolve = resolve
+  })
+  return {
+    promise,
+    resolve() {
+      state.resolve?.()
+    },
+  }
 }
 
 function model(): Provider.Model {
@@ -122,6 +137,51 @@ function boundaries() {
     restore() {
       all.mockRestore()
       scoped.mockRestore()
+      clients.mockRestore()
+      stdio.mockRestore()
+      stream.mockRestore()
+      sse.mockRestore()
+    },
+  }
+}
+
+function controls(input: { list(index: number): void | Promise<void>; tool?(index: number): string }) {
+  const calls = {
+    clients: 0,
+    list: 0,
+    stdio: [] as string[],
+    closed: [] as number[],
+  }
+  const lifecycle = spyOn(MCP.Boundary, "lifecycle")
+  const clients = spyOn(MCP.Boundary, "client").mockImplementation(() => {
+    const index = calls.clients++
+    calls.closed[index] = 0
+    return client(
+      async () => {
+        calls.list++
+        await input.list(index)
+      },
+      () => {
+        calls.closed[index]++
+      },
+      input.tool?.(index) ?? "search",
+    )
+  })
+  const stdio = spyOn(MCP.Boundary, "stdio").mockImplementation((options) => {
+    calls.stdio.push(options.command)
+    return transport()
+  })
+  const stream = spyOn(MCP.Boundary, "stream").mockImplementation(() => transport())
+  const sse = spyOn(MCP.Boundary, "sse").mockImplementation(() => transport())
+  return {
+    calls,
+    lifecycle,
+    clients,
+    stdio,
+    stream,
+    sse,
+    restore() {
+      lifecycle.mockRestore()
       clients.mockRestore()
       stdio.mockRestore()
       stream.mockRestore()
@@ -243,6 +303,73 @@ test("parameter-specific MCP allowance initializes only its server", async () =>
   })
 })
 
+test("later equivalent deny supersedes an earlier parameter-specific allow", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: {
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const ruleset: Permission.Ruleset = [
+        { permission: "*", pattern: "*", action: "deny" },
+        { permission: "synthetic_search", pattern: "safe-query", action: "allow" },
+        { permission: "synthetic_search", pattern: "safe-query", action: "deny" },
+      ]
+      const boundary = boundaries()
+      try {
+        expect(await MCPToolResolution.servers(ruleset)).toEqual([])
+        expect(await MCPToolResolution.resolve(ruleset)).toEqual({})
+        expect(boundary.scoped).toHaveBeenCalledTimes(0)
+        expect(boundary.clients).toHaveBeenCalledTimes(0)
+        expect(boundary.calls.stdio).toEqual([])
+        expect(boundary.calls.list).toBe(0)
+      } finally {
+        await Instance.dispose()
+        boundary.restore()
+      }
+    },
+  })
+})
+
+test("question wildcard permission selects only the overlapping server namespace", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: {
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+        blocked: { type: "local", command: ["blocked-never-run"] },
+        remote: { type: "remote", url: "https://127.0.0.1:1" },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const ruleset: Permission.Ruleset = [
+        { permission: "*", pattern: "*", action: "deny" },
+        { permission: "synthetic?search", pattern: "safe-query", action: "allow" },
+      ]
+      const boundary = boundaries()
+      try {
+        expect(await MCPToolResolution.servers(ruleset)).toEqual(["synthetic"])
+        expect(Object.keys(await MCPToolResolution.resolve(ruleset))).toEqual(["synthetic_search"])
+        expect(boundary.scoped).toHaveBeenCalledWith(["synthetic"])
+        expect(boundary.calls.stdio).toEqual(["synthetic-never-run"])
+        expect(boundary.calls.stdio).not.toContain("blocked-never-run")
+        expect(boundary.calls.http).toEqual([])
+        expect(boundary.calls.sse).toEqual([])
+        expect(boundary.calls.list).toBe(1)
+      } finally {
+        await Instance.dispose()
+        boundary.restore()
+      }
+    },
+  })
+})
+
 test("SessionPrompt production path merges agent and session MCP permissions", async () => {
   await using tmp = await tmpdir({
     config: {
@@ -291,6 +418,153 @@ test("SessionPrompt production path merges agent and session MCP permissions", a
       } finally {
         await Instance.dispose()
         boundary.restore()
+      }
+    },
+  })
+})
+
+test("concurrent scoped resolution initializes one cached client", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: {
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const entered = signal()
+      const release = signal()
+      const control = controls({
+        async list() {
+          entered.resolve()
+          await release.promise
+        },
+      })
+      const cleanup = { disposed: false }
+      try {
+        const pending = Array.from({ length: 4 }, () => MCP.toolsForServers(["synthetic"]))
+        await entered.promise
+        release.resolve()
+        const results = await Promise.all(pending)
+        expect(results.map((result) => Object.keys(result))).toEqual([
+          ["synthetic_search"],
+          ["synthetic_search"],
+          ["synthetic_search"],
+          ["synthetic_search"],
+        ])
+        expect(control.calls.stdio).toEqual(["synthetic-never-run"])
+        expect(control.calls.clients).toBe(1)
+        expect(control.calls.list).toBe(1)
+        expect(control.calls.closed).toEqual([0])
+        await Instance.dispose()
+        cleanup.disposed = true
+        expect(control.calls.closed).toEqual([1])
+      } finally {
+        if (!cleanup.disposed) await Instance.dispose()
+        control.restore()
+      }
+    },
+  })
+})
+
+test("disconnect invoked during initialization wins without leaking the client", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: {
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const entered = signal()
+      const release = signal()
+      const queued = signal()
+      const control = controls({
+        async list() {
+          entered.resolve()
+          await release.promise
+        },
+      })
+      control.lifecycle.mockImplementation((name, operation) => {
+        if (name === "synthetic" && operation === "disconnect") queued.resolve()
+      })
+      try {
+        const resolving = MCP.toolsForServers(["synthetic"])
+        await entered.promise
+        const disconnecting = MCP.disconnect("synthetic")
+        await queued.promise
+        release.resolve()
+        await Promise.all([resolving, disconnecting])
+
+        expect((await MCP.status()).synthetic?.status).toBe("disabled")
+        expect((await MCP.clients()).synthetic).toBeUndefined()
+        expect(await MCP.toolsForServers(["synthetic"])).toEqual({})
+        expect(control.calls.stdio).toEqual(["synthetic-never-run"])
+        expect(control.calls.clients).toBe(1)
+        expect(control.calls.list).toBe(1)
+        expect(control.calls.closed).toEqual([1])
+      } finally {
+        await Instance.dispose()
+        control.restore()
+      }
+    },
+  })
+})
+
+test("add invoked during initialization serializes replacement and closes the displaced client", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: {
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const entered = signal()
+      const release = signal()
+      const queued = signal()
+      const control = controls({
+        async list(index) {
+          if (index !== 0) return
+          entered.resolve()
+          await release.promise
+        },
+        tool(index) {
+          return index === 0 ? "initial" : "replacement"
+        },
+      })
+      control.lifecycle.mockImplementation((name, operation) => {
+        if (name === "synthetic" && operation === "store") queued.resolve()
+      })
+      const cleanup = { disposed: false }
+      try {
+        const resolving = MCP.toolsForServers(["synthetic"])
+        await entered.promise
+        const adding = MCP.add("synthetic", { type: "local", command: ["replacement-never-run"] })
+        await queued.promise
+        release.resolve()
+        await Promise.all([resolving, adding])
+
+        expect(Object.keys(await MCP.toolsForServers(["synthetic"]))).toEqual(["synthetic_replacement"])
+        expect(control.calls.stdio).toEqual(["synthetic-never-run", "replacement-never-run"])
+        expect(control.calls.clients).toBe(2)
+        expect(control.calls.list).toBe(2)
+        expect(control.calls.closed).toEqual([1, 0])
+        expect(Object.keys(await MCP.clients())).toEqual(["synthetic"])
+        expect(control.calls.clients - control.calls.closed.reduce((sum, count) => sum + count, 0)).toBe(1)
+
+        await Instance.dispose()
+        cleanup.disposed = true
+        expect(control.calls.closed).toEqual([1, 1])
+      } finally {
+        if (!cleanup.disposed) await Instance.dispose()
+        control.restore()
       }
     },
   })

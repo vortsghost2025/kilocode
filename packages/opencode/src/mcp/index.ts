@@ -33,7 +33,7 @@ import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import open from "open"
-import { Deferred, Effect, Exit, Layer, Option, ServiceMap, Stream } from "effect" // kilocode_change
+import { Effect, Exit, Layer, Option, Semaphore, ServiceMap, Stream } from "effect" // kilocode_change
 import { InstanceState } from "@/effect/instance-state"
 import { makeRuntime } from "@/effect/run-service"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -154,6 +154,8 @@ export namespace MCP {
 
   // kilocode_change start - expose scoped construction seams for MCP boundary tests
   export namespace Boundary {
+    export function lifecycle(_name: string, _operation: "ensure" | "store" | "disconnect") {}
+
     export function client() {
       return new Client({ name: "opencode", version: Installation.VERSION })
     }
@@ -254,7 +256,7 @@ export namespace MCP {
     clients: Record<string, MCPClient>
     defs: Record<string, MCPToolDef[]>
     ready: Set<string> // kilocode_change
-    pending: Map<string, Deferred.Deferred<void>> // kilocode_change
+    locks: Map<string, Semaphore.Semaphore> // kilocode_change
   }
 
   export interface Interface {
@@ -536,7 +538,7 @@ export namespace MCP {
             clients: {},
             defs: {},
             ready: new Set(), // kilocode_change
-            pending: new Map(), // kilocode_change
+            locks: new Map(), // kilocode_change
           }
 
           yield* Effect.addFinalizer(() =>
@@ -566,7 +568,60 @@ export namespace MCP {
         }),
       )
 
-      // kilocode_change start - lazily initialize only selected server namespaces in the shared cache
+      // kilocode_change start - shared unlocked close helper for serialized lifecycle operations
+      function closeClient(s: State, name: string) {
+        const client = s.clients[name]
+        delete s.defs[name]
+        if (!client) return Effect.void
+        return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+      }
+      // kilocode_change end
+
+      // kilocode_change start - serialize all lifecycle operations per server while allowing cross-server concurrency
+      const lock = (s: State, name: string) => {
+        const hit = s.locks.get(name)
+        if (hit) return hit
+        const next = Semaphore.makeUnsafe(1)
+        s.locks.set(name, next)
+        return next
+      }
+
+      const serialized = <A, E, R>(s: State, name: string, effect: Effect.Effect<A, E, R>) =>
+        lock(s, name).withPermits(1)(effect)
+
+      const installUnlocked = Effect.fnUntraced(function* (
+        s: State,
+        name: string,
+        result: CreateResult,
+        timeout?: number,
+      ) {
+        s.status[name] = result.status
+        if (!result.mcpClient) {
+          yield* closeClient(s, name)
+          delete s.clients[name]
+          s.ready.add(name)
+          return result.status
+        }
+
+        const owner = { installed: false }
+        yield* Effect.gen(function* () {
+          yield* closeClient(s, name)
+          s.clients[name] = result.mcpClient!
+          s.defs[name] = result.defs!
+          watch(s, name, result.mcpClient!, timeout)
+          owner.installed = true
+          s.ready.add(name)
+        }).pipe(
+          Effect.ensuring(
+            Effect.suspend(() => {
+              if (owner.installed) return Effect.void
+              return Effect.tryPromise(() => result.mcpClient!.close()).pipe(Effect.ignore)
+            }),
+          ),
+        )
+        return result.status
+      })
+
       const configured = Effect.fnUntraced(function* () {
         const cfg = yield* cfgSvc.get()
         return Object.entries(cfg.mcp ?? {})
@@ -574,62 +629,39 @@ export namespace MCP {
           .map(([name]) => name)
       })
 
-      const ensureServer = Effect.fnUntraced(function* (s: State, name: string) {
+      const initializeUnlocked = Effect.fnUntraced(function* (s: State, name: string) {
         if (s.ready.has(name)) return
-        const active = s.pending.get(name)
-        if (active) {
-          yield* Deferred.await(active)
+        const cfg = yield* cfgSvc.get()
+        const mcp = cfg.mcp?.[name]
+        if (!mcp || !isMcpConfigured(mcp)) {
+          log.error("Ignoring MCP config entry without type", { key: name })
+          s.ready.add(name)
           return
         }
 
-        const deferred = yield* Deferred.make<void>()
-        s.pending.set(name, deferred)
-        yield* Effect.gen(function* () {
-          const cfg = yield* cfgSvc.get()
-          const mcp = cfg.mcp?.[name]
-          if (!mcp || !isMcpConfigured(mcp)) {
-            log.error("Ignoring MCP config entry without type", { key: name })
-            s.ready.add(name)
-            return
-          }
-
-          if (mcp.enabled === false) {
-            s.status[name] = { status: "disabled" }
-            s.ready.add(name)
-            return
-          }
-
-          const result = yield* create(name, mcp).pipe(Effect.catch(() => Effect.succeed(undefined)))
-          if (result) {
-            s.status[name] = result.status
-            if (result.mcpClient) {
-              s.clients[name] = result.mcpClient
-              s.defs[name] = result.defs!
-              watch(s, name, result.mcpClient, mcp.timeout)
-            }
-          }
+        if (mcp.enabled === false) {
+          s.status[name] = { status: "disabled" }
           s.ready.add(name)
-        }).pipe(
-          Effect.ensuring(
-            Effect.gen(function* () {
-              s.pending.delete(name)
-              yield* Deferred.succeed(deferred, undefined)
-            }),
-          ),
-        )
+          return
+        }
+
+        const result = yield* create(name, mcp).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        if (result) {
+          yield* installUnlocked(s, name, result, mcp.timeout)
+          return
+        }
+        s.ready.add(name)
+      })
+
+      const ensureServer = Effect.fnUntraced(function* (s: State, name: string) {
+        Boundary.lifecycle(name, "ensure")
+        yield* serialized(s, name, initializeUnlocked(s, name))
       })
 
       const ensureServers = Effect.fnUntraced(function* (s: State, names: string[]) {
         yield* Effect.forEach([...new Set(names)], (name) => ensureServer(s, name), { concurrency: "unbounded" })
       })
       // kilocode_change end
-
-      function closeClient(s: State, name: string) {
-        const client = s.clients[name]
-        delete s.defs[name]
-        if (!client) return Effect.void
-        return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
-      }
 
       const status = Effect.fn("MCP.status")(function* () {
         const s = yield* InstanceState.get(cache)
@@ -653,24 +685,18 @@ export namespace MCP {
         return s.clients
       })
 
+      // kilocode_change start - create/store runs unlocked only while its caller owns the per-server boundary
+      const storeUnlocked = Effect.fnUntraced(function* (s: State, name: string, mcp: Config.Mcp) {
+        const result = yield* create(name, mcp)
+        return yield* installUnlocked(s, name, result, mcp.timeout)
+      })
+
       const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: Config.Mcp) {
         const s = yield* InstanceState.get(cache)
-        const result = yield* create(name, mcp)
-
-        s.status[name] = result.status
-        s.ready.add(name) // kilocode_change
-        if (!result.mcpClient) {
-          yield* closeClient(s, name)
-          delete s.clients[name]
-          return result.status
-        }
-
-        yield* closeClient(s, name)
-        s.clients[name] = result.mcpClient
-        s.defs[name] = result.defs!
-        watch(s, name, result.mcpClient, mcp.timeout)
-        return result.status
+        Boundary.lifecycle(name, "store")
+        return yield* serialized(s, name, storeUnlocked(s, name, mcp))
       })
+      // kilocode_change end
 
       const add = Effect.fn("MCP.add")(function* (name: string, mcp: Config.Mcp) {
         yield* createAndStore(name, mcp)
@@ -689,10 +715,19 @@ export namespace MCP {
 
       const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
         const s = yield* InstanceState.get(cache)
-        yield* closeClient(s, name)
-        delete s.clients[name]
-        s.status[name] = { status: "disabled" }
-        s.ready.add(name) // kilocode_change
+        Boundary.lifecycle(name, "disconnect") // kilocode_change
+        // kilocode_change start - serialize disconnect after any already-invoked initialization or replacement
+        yield* serialized(
+          s,
+          name,
+          Effect.gen(function* () {
+            yield* closeClient(s, name)
+            delete s.clients[name]
+            s.status[name] = { status: "disabled" }
+            s.ready.add(name)
+          }),
+        )
+        // kilocode_change end
       })
 
       // kilocode_change start - ensure and expose only the requested server namespaces
