@@ -153,6 +153,7 @@ function controls(input: { list(index: number): void | Promise<void>; tool?(inde
     closed: [] as number[],
   }
   const lifecycle = spyOn(MCP.Boundary, "lifecycle")
+  const preinstall = spyOn(MCP.Boundary, "preinstall")
   const clients = spyOn(MCP.Boundary, "client").mockImplementation(() => {
     const index = calls.clients++
     calls.closed[index] = 0
@@ -176,12 +177,14 @@ function controls(input: { list(index: number): void | Promise<void>; tool?(inde
   return {
     calls,
     lifecycle,
+    preinstall,
     clients,
     stdio,
     stream,
     sse,
     restore() {
       lifecycle.mockRestore()
+      preinstall.mockRestore()
       clients.mockRestore()
       stdio.mockRestore()
       stream.mockRestore()
@@ -562,6 +565,169 @@ test("add invoked during initialization serializes replacement and closes the di
         await Instance.dispose()
         cleanup.disposed = true
         expect(control.calls.closed).toEqual([1, 1])
+      } finally {
+        if (!cleanup.disposed) await Instance.dispose()
+        control.restore()
+      }
+    },
+  })
+})
+
+test("interruption during listTools closes the uninstalled client and permits retry", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: {
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const entered = signal()
+      const release = signal()
+      const control = controls({
+        async list(index) {
+          if (index !== 0) return
+          entered.resolve()
+          await release.promise
+        },
+      })
+      const abort = new AbortController()
+      const cleanup = { disposed: false }
+      try {
+        const pending = MCP.toolsForServers(["synthetic"], { signal: abort.signal })
+        const stopped = pending.then(
+          () => false,
+          () => true,
+        )
+        await entered.promise
+        abort.abort()
+        release.resolve()
+        expect(await stopped).toBe(true)
+        expect(await MCP.inspect("synthetic")).toEqual({ client: false, defs: false, ready: false })
+        expect(control.calls.clients).toBe(1)
+        expect(control.calls.closed).toEqual([1])
+
+        expect(Object.keys(await MCP.toolsForServers(["synthetic"]))).toEqual(["synthetic_search"])
+        expect(control.calls.clients).toBe(2)
+        expect(control.calls.list).toBe(2)
+        expect(control.calls.closed).toEqual([1, 0])
+
+        await Instance.dispose()
+        cleanup.disposed = true
+        expect(control.calls.closed).toEqual([1, 1])
+      } finally {
+        if (!cleanup.disposed) await Instance.dispose()
+        control.restore()
+      }
+    },
+  })
+})
+
+test("interruption after definitions closes the pre-install client and permits retry", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: {
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const entered = signal()
+      const release = signal()
+      const control = controls({ list() {} })
+      const visits = { count: 0 }
+      control.preinstall.mockImplementation(async () => {
+        if (visits.count++ !== 0) return
+        entered.resolve()
+        await release.promise
+      })
+      const abort = new AbortController()
+      const cleanup = { disposed: false }
+      try {
+        const pending = MCP.toolsForServers(["synthetic"], { signal: abort.signal })
+        const stopped = pending.then(
+          () => false,
+          () => true,
+        )
+        await entered.promise
+        abort.abort()
+        release.resolve()
+        expect(await stopped).toBe(true)
+        expect(await MCP.inspect("synthetic")).toEqual({ client: false, defs: false, ready: false })
+        expect(control.calls.clients).toBe(1)
+        expect(control.calls.list).toBe(1)
+        expect(control.calls.closed).toEqual([1])
+
+        expect(Object.keys(await MCP.toolsForServers(["synthetic"]))).toEqual(["synthetic_search"])
+        expect(control.calls.clients).toBe(2)
+        expect(control.calls.list).toBe(2)
+        expect(control.calls.closed).toEqual([1, 0])
+
+        await Instance.dispose()
+        cleanup.disposed = true
+        expect(control.calls.closed).toEqual([1, 1])
+      } finally {
+        if (!cleanup.disposed) await Instance.dispose()
+        control.restore()
+      }
+    },
+  })
+})
+
+test("canceling a semaphore waiter does not affect the owner or later callers", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: {
+        synthetic: { type: "local", command: ["synthetic-never-run"] },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const entered = signal()
+      const release = signal()
+      const waiting = signal()
+      const control = controls({
+        async list() {
+          entered.resolve()
+          await release.promise
+        },
+      })
+      const visits = { ensure: 0 }
+      control.lifecycle.mockImplementation((name, operation) => {
+        if (name !== "synthetic" || operation !== "ensure") return
+        if (++visits.ensure === 2) waiting.resolve()
+      })
+      const abort = new AbortController()
+      const cleanup = { disposed: false }
+      try {
+        const owner = MCP.toolsForServers(["synthetic"])
+        await entered.promise
+        const waiter = MCP.toolsForServers(["synthetic"], { signal: abort.signal })
+        const stopped = waiter.then(
+          () => false,
+          () => true,
+        )
+        await waiting.promise
+        abort.abort()
+        expect(await stopped).toBe(true)
+
+        release.resolve()
+        expect(Object.keys(await owner)).toEqual(["synthetic_search"])
+        expect(Object.keys(await MCP.toolsForServers(["synthetic"]))).toEqual(["synthetic_search"])
+        expect(await MCP.inspect("synthetic")).toEqual({ client: true, defs: true, ready: true })
+        expect(control.calls.clients).toBe(1)
+        expect(control.calls.list).toBe(1)
+        expect(control.calls.closed).toEqual([0])
+
+        await Instance.dispose()
+        cleanup.disposed = true
+        expect(control.calls.closed).toEqual([1])
       } finally {
         if (!cleanup.disposed) await Instance.dispose()
         control.restore()

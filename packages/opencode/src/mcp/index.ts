@@ -156,6 +156,8 @@ export namespace MCP {
   export namespace Boundary {
     export function lifecycle(_name: string, _operation: "ensure" | "store" | "disconnect") {}
 
+    export async function preinstall(_name: string) {}
+
     export function client() {
       return new Client({ name: "opencode", version: Installation.VERSION })
     }
@@ -249,6 +251,12 @@ export namespace MCP {
     defs?: MCPToolDef[]
   }
 
+  // kilocode_change start - track connected-client ownership until state installation commits
+  interface Owner {
+    transferred: boolean
+  }
+  // kilocode_change end
+
   // --- Effect Service ---
 
   interface State {
@@ -264,6 +272,7 @@ export namespace MCP {
     readonly clients: () => Effect.Effect<Record<string, MCPClient>>
     readonly tools: () => Effect.Effect<Record<string, Tool>>
     readonly toolsForServers: (names: string[]) => Effect.Effect<Record<string, Tool>> // kilocode_change
+    readonly inspect: (name: string) => Effect.Effect<{ client: boolean; defs: boolean; ready: boolean }> // kilocode_change
     readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
     readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
     readonly add: (name: string, mcp: Config.Mcp) => Effect.Effect<{ status: Record<string, Status> | Status }>
@@ -463,32 +472,47 @@ export namespace MCP {
         )
       })
 
-      const create = Effect.fn("MCP.create")(function* (key: string, mcp: Config.Mcp) {
+      // kilocode_change start - retain ownership from successful connection through final state installation
+      const create = Effect.fn("MCP.create")(function* (
+        key: string,
+        mcp: Config.Mcp,
+        install: (result: CreateResult, owner?: Owner) => Effect.Effect<Status>,
+      ) {
         if (mcp.enabled === false) {
           log.info("mcp server disabled", { key })
-          return DISABLED_RESULT
+          return yield* install(DISABLED_RESULT)
         }
 
         log.info("found", { key, type: mcp.type })
 
-        const { client: mcpClient, status } =
+        const connect =
           mcp.type === "remote"
-            ? yield* connectRemote(key, mcp as Config.Mcp & { type: "remote" })
-            : yield* connectLocal(key, mcp as Config.Mcp & { type: "local" })
+            ? connectRemote(key, mcp as Config.Mcp & { type: "remote" })
+            : connectLocal(key, mcp as Config.Mcp & { type: "local" })
 
-        if (!mcpClient) {
-          return { status } satisfies CreateResult
-        }
+        const owner: Owner = { transferred: false }
+        return yield* Effect.acquireUseRelease(
+          connect,
+          ({ client, status }) =>
+            client
+              ? Effect.gen(function* () {
+                  const listed = yield* defs(key, client, mcp.timeout)
+                  if (!listed) {
+                    return yield* install({ status: { status: "failed", error: "Failed to get tools" } })
+                  }
 
-        const listed = yield* defs(key, mcpClient, mcp.timeout)
-        if (!listed) {
-          yield* Effect.tryPromise(() => mcpClient.close()).pipe(Effect.ignore)
-          return { status: { status: "failed", error: "Failed to get tools" } } satisfies CreateResult
-        }
-
-        log.info("create() successfully created client", { key, toolCount: listed.length })
-        return { mcpClient, status, defs: listed } satisfies CreateResult
+                  log.info("create() successfully created client", { key, toolCount: listed.length })
+                  yield* Effect.promise(() => Boundary.preinstall(key))
+                  return yield* install({ mcpClient: client, status, defs: listed }, owner)
+                })
+              : install({ status }),
+          ({ client }) => {
+            if (!client || owner.transferred) return Effect.void
+            return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+          },
+        )
       })
+      // kilocode_change end
       const cfgSvc = yield* Config.Service
 
       const descendants = Effect.fnUntraced(
@@ -593,32 +617,25 @@ export namespace MCP {
         s: State,
         name: string,
         result: CreateResult,
+        owner?: Owner,
         timeout?: number,
       ) {
-        s.status[name] = result.status
         if (!result.mcpClient) {
           yield* closeClient(s, name)
           delete s.clients[name]
+          s.status[name] = result.status
           s.ready.add(name)
           return result.status
         }
 
-        const owner = { installed: false }
-        yield* Effect.gen(function* () {
-          yield* closeClient(s, name)
-          s.clients[name] = result.mcpClient!
-          s.defs[name] = result.defs!
-          watch(s, name, result.mcpClient!, timeout)
-          owner.installed = true
-          s.ready.add(name)
-        }).pipe(
-          Effect.ensuring(
-            Effect.suspend(() => {
-              if (owner.installed) return Effect.void
-              return Effect.tryPromise(() => result.mcpClient!.close()).pipe(Effect.ignore)
-            }),
-          ),
-        )
+        if (!owner) return yield* Effect.die("Missing MCP client owner")
+        yield* closeClient(s, name)
+        s.clients[name] = result.mcpClient
+        s.defs[name] = result.defs!
+        watch(s, name, result.mcpClient, timeout)
+        s.status[name] = result.status
+        s.ready.add(name)
+        owner.transferred = true
         return result.status
       })
 
@@ -645,11 +662,10 @@ export namespace MCP {
           return
         }
 
-        const result = yield* create(name, mcp).pipe(Effect.catch(() => Effect.succeed(undefined)))
-        if (result) {
-          yield* installUnlocked(s, name, result, mcp.timeout)
-          return
-        }
+        const result = yield* create(name, mcp, (created, owner) =>
+          installUnlocked(s, name, created, owner, mcp.timeout),
+        ).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        if (result) return
         s.ready.add(name)
       })
 
@@ -687,8 +703,7 @@ export namespace MCP {
 
       // kilocode_change start - create/store runs unlocked only while its caller owns the per-server boundary
       const storeUnlocked = Effect.fnUntraced(function* (s: State, name: string, mcp: Config.Mcp) {
-        const result = yield* create(name, mcp)
-        return yield* installUnlocked(s, name, result, mcp.timeout)
+        return yield* create(name, mcp, (created, owner) => installUnlocked(s, name, created, owner, mcp.timeout))
       })
 
       const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: Config.Mcp) {
@@ -772,6 +787,15 @@ export namespace MCP {
         const s = yield* InstanceState.get(cache)
         const names = [...(yield* configured()), ...Object.keys(s.clients)]
         return yield* toolsForServers(names)
+      })
+
+      const inspect = Effect.fn("MCP.inspect")(function* (name: string) {
+        const s = yield* InstanceState.get(cache)
+        return {
+          client: name in s.clients,
+          defs: name in s.defs,
+          ready: s.ready.has(name),
+        }
       })
       // kilocode_change end
 
@@ -989,6 +1013,7 @@ export namespace MCP {
         clients,
         tools,
         toolsForServers, // kilocode_change
+        inspect, // kilocode_change
         prompts,
         resources,
         add,
@@ -1029,7 +1054,13 @@ export namespace MCP {
 
   export const tools = async () => runPromise((svc) => svc.tools())
 
-  export const toolsForServers = async (names: string[]) => runPromise((svc) => svc.toolsForServers(names)) // kilocode_change
+  // kilocode_change start - expose cancellation to scoped MCP callers and ownership tests
+  export const toolsForServers = async (names: string[], options?: Effect.RunOptions) =>
+    runPromise((svc) => svc.toolsForServers(names), options)
+
+  /** @internal */
+  export const inspect = async (name: string) => runPromise((svc) => svc.inspect(name))
+  // kilocode_change end
 
   export const prompts = async () => runPromise((svc) => svc.prompts())
 
