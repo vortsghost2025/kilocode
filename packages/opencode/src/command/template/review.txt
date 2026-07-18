@@ -22,8 +22,14 @@ Based on the input provided, determine which type of review to perform:
    - Run: `git diff $ARGUMENTS...HEAD`
 
 4. **PR URL or number** (contains "github.com" or "pull" or looks like a PR number): Review the pull request
-   - Run: `gh pr view $ARGUMENTS` to get PR context
-   - Run: `gh pr diff $ARGUMENTS` to get the diff
+   - If available, use `gh pr view $ARGUMENTS` to get PR context
+   - If available, use `gh pr diff $ARGUMENTS` to get the diff
+   - If gh is not available, use `git log --oneline -20` to see recent commits and check if the PR has been merged
+
+5. **External file path** (looks like an absolute or relative file path, contains "/" or "\" or ":"): Review the named file
+   - Use `read` to read the file contents
+   - If the file does not exist, report that and fall back to git-based review
+   - Review the configuration structure, security implications, and correctness
 
 Use best judgement when processing input.
 
@@ -83,9 +89,9 @@ Use best judgement when processing input.
 
 Use these to inform your review:
 
-- **Explore agent** - Find how existing code handles similar problems. Check patterns, conventions, and prior art before claiming something doesn't fit.
-- **Exa Code Context** - Verify correct usage of libraries/APIs before flagging something as wrong.
-- **Exa Web Search** - Research best practices if you're unsure about a pattern.
+- **Read/Glob/Grep** - Inspect files around the diff to understand existing patterns, conventions, and prior art.
+- **Git diff/log/show** - Examine changes and commit history.
+- **Skills** - Load the `code-review` or `strict-code-review` skill for a structured checklist when the review warrants deeper analysis.
 
 If you're uncertain about something and can't verify it with these tools, say "I'm not sure about X" rather than flagging it as a definite issue.
 
