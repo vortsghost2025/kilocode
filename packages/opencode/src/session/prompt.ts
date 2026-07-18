@@ -3,6 +3,7 @@ import os from "os"
 import fs from "fs/promises"
 import { KiloSessionPrompt } from "@/kilocode/session/prompt" // kilocode_change
 import { ForegroundTask } from "@/kilocode/foreground-task" // kilocode_change
+import { ToolAsk } from "@/kilocode/permission/tool-ask" // kilocode_change
 import z from "zod"
 import { Filesystem } from "../util/filesystem"
 import { SessionID, MessageID, PartID } from "./schema"
@@ -892,14 +893,15 @@ export namespace SessionPrompt {
           })
         }
       },
-      async ask(req) {
-        await Permission.ask({
-          ...req,
-          sessionID: input.session.id,
-          tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-          ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
-        })
-      },
+      // kilocode_change start — ask closure now sourced from ToolAsk.build
+      ask: ToolAsk.build({
+        sessionID: input.session.id,
+        messageID: input.processor.message.id,
+        callID: options.toolCallId,
+        agent: input.agent.permission,
+        session: input.session.permission ?? [],
+      }).ask,
+      // kilocode_change end
     })
 
     for (const item of await ToolRegistry.tools(

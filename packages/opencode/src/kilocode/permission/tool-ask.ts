@@ -1,0 +1,26 @@
+// kilocode_change - new file
+import { Permission } from "@/permission"
+import { MessageID, SessionID } from "@/session/schema"
+
+export namespace ToolAsk {
+  export function build(input: {
+    sessionID: SessionID
+    messageID: MessageID
+    callID: string
+    agent: Permission.Ruleset
+    session: Permission.Ruleset
+  }): {
+    ask: (req: Omit<Permission.Request, "id" | "sessionID" | "tool">) => Promise<void>
+  } {
+    return {
+      async ask(req) {
+        await Permission.ask({
+          ...req,
+          sessionID: input.sessionID,
+          tool: { messageID: input.messageID, callID: input.callID },
+          ruleset: Permission.merge(input.agent, input.session),
+        })
+      },
+    }
+  }
+}

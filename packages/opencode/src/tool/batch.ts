@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "./tool"
 import { ProviderID, ModelID } from "../provider/schema"
+import { Permission } from "../permission" // kilocode_change
 import { errorMessage } from "../util/error"
 import DESCRIPTION from "./batch.txt"
 
@@ -61,6 +62,15 @@ export const BatchTool = Tool.define("batch", async () => {
             )
           }
           const validatedParams = tool.parameters.parse(call.parameters)
+
+          // kilocode_change start — enforce merged agent/session permission before invocation
+          await ctx.ask({
+            permission: Permission.permissionForTool(call.tool),
+            patterns: ["*"],
+            always: ["*"],
+            metadata: {},
+          })
+          // kilocode_change end
 
           await Session.updatePart({
             id: partID,

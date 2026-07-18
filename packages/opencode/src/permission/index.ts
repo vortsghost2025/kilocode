@@ -441,10 +441,16 @@ export namespace Permission {
 
   const EDIT_TOOLS = ["edit", "write", "apply_patch", "multiedit"]
 
+  // kilocode_change start — exported so nested-tool enforcement (e.g. BatchTool) can map tool id to permission name
+  export function permissionForTool(tool: string): string {
+    return EDIT_TOOLS.includes(tool) ? "edit" : tool
+  }
+  // kilocode_change end
+
   export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
     const result = new Set<string>()
     for (const tool of tools) {
-      const permission = EDIT_TOOLS.includes(tool) ? "edit" : tool
+      const permission = permissionForTool(tool)
       const rule = ruleset.findLast((rule) => Wildcard.match(permission, rule.permission))
       if (!rule) continue
       if (rule.pattern === "*" && rule.action === "deny") result.add(tool)
