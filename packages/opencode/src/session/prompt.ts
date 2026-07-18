@@ -44,6 +44,7 @@ import { SessionProcessor } from "./processor"
 import { TaskTool } from "@/tool/task"
 import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
+import { MCPToolResolution } from "@/kilocode/mcp-tool-resolution" // kilocode_change
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
 import { iife } from "@/util/iife"
@@ -951,7 +952,12 @@ export namespace SessionPrompt {
       })
     }
 
-    for (const [key, item] of Object.entries(await MCP.tools())) {
+    // kilocode_change start - skip MCP runtime initialization when every configured namespace is denied
+    const mcp = await MCPToolResolution.resolve(
+      Permission.merge(input.agent.permission, input.session.permission ?? []),
+    )
+    for (const [key, item] of Object.entries(mcp)) {
+      // kilocode_change end
       const execute = item.execute
       if (!execute) continue
 
@@ -1044,7 +1050,6 @@ export namespace SessionPrompt {
       }
       tools[key] = item
     }
-
     return tools
   }
 

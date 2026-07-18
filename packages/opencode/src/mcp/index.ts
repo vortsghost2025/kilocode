@@ -152,6 +152,26 @@ export namespace MCP {
 
   const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_")
 
+  // kilocode_change start - expose scoped construction seams for MCP boundary tests
+  export namespace Boundary {
+    export function client() {
+      return new Client({ name: "opencode", version: Installation.VERSION })
+    }
+
+    export function stdio(...args: ConstructorParameters<typeof StdioClientTransport>) {
+      return new StdioClientTransport(...args)
+    }
+
+    export function stream(...args: ConstructorParameters<typeof StreamableHTTPClientTransport>) {
+      return new StreamableHTTPClientTransport(...args)
+    }
+
+    export function sse(...args: ConstructorParameters<typeof SSEClientTransport>) {
+      return new SSEClientTransport(...args)
+    }
+  }
+  // kilocode_change end
+
   // Convert MCP tool definition to AI SDK Tool type
   function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number): Tool {
     const inputSchema = mcpTool.inputSchema
@@ -283,7 +303,7 @@ export namespace MCP {
           (t) =>
             Effect.tryPromise({
               try: () => {
-                const client = new Client({ name: "opencode", version: Installation.VERSION })
+                const client = Boundary.client() // kilocode_change
                 return withTimeout(client.connect(t), timeout).then(() => client)
               },
               catch: (e) => (e instanceof Error ? e : new Error(String(e))),
@@ -321,17 +341,21 @@ export namespace MCP {
         const transports: Array<{ name: string; transport: TransportWithAuth }> = [
           {
             name: "StreamableHTTP",
-            transport: new StreamableHTTPClientTransport(new URL(mcp.url), {
+            // kilocode_change start - route remote transport construction through the scoped boundary
+            transport: Boundary.stream(new URL(mcp.url), {
               authProvider,
               requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
             }),
+            // kilocode_change end
           },
           {
             name: "SSE",
-            transport: new SSEClientTransport(new URL(mcp.url), {
+            // kilocode_change start - route SSE transport construction through the scoped boundary
+            transport: Boundary.sse(new URL(mcp.url), {
               authProvider,
               requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
             }),
+            // kilocode_change end
           },
         ]
 
@@ -403,7 +427,8 @@ export namespace MCP {
       const connectLocal = Effect.fn("MCP.connectLocal")(function* (key: string, mcp: Config.Mcp & { type: "local" }) {
         const [cmd, ...args] = mcp.command
         const cwd = Instance.directory
-        const transport = new StdioClientTransport({
+        // kilocode_change start - route stdio transport construction through the scoped boundary
+        const transport = Boundary.stdio({
           stderr: "pipe",
           command: cmd,
           args,
@@ -414,6 +439,7 @@ export namespace MCP {
             ...mcp.environment,
           },
         })
+        // kilocode_change end
         transport.stderr?.on("data", (chunk: Buffer) => {
           log.info(`mcp stderr: ${chunk.toString()}`, { key })
         })
