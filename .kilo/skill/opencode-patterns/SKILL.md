@@ -25,8 +25,8 @@ export namespace Session {
 
 Real example: `src/session/message-v2.ts:41` (export namespace MessageV2).
 
-Constraint: flat namespace (no nesting), name matches the module concept (e.g.
-`Tool`, `Bus`, `Session`).
+Observed pattern: modules use flat namespaces (no nesting observed in the
+codebase), name matches the module concept (e.g. `Tool`, `Bus`, `Session`).
 
 ## 2. `fn(schema, callback)` — Zod-validated function wrapper
 
@@ -146,7 +146,7 @@ APIError), `src/storage/storage.ts:18` (NotFoundError), `src/provider/provider.t
 Constraints: convention observed in the codebase favors PascalCase name with
 descriptive suffix (e.g. `NotFoundError`, `AuthError`). Narrow schema
 (`z.object({...})`) helps tool/API consumers handle specific shapes. Call at
-module top level (it's a class factory, not a runtime function).
+module scope (as seen in all existing examples — the factory returns a class).
 
 ## 7. `iife(fn)` — Immediately-invoked function expression
 
