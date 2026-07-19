@@ -27,6 +27,8 @@ The fork focuses on making multi-agent software development more predictable and
 
 A dedicated Orchestrator primary agent coordinates complex work by delegating to specialized subagents. Leading `@agent` mentions route deterministically through the task tool, preserving the full delegated prompt. The orchestrator handles failure fallback and produces structured evidence handoffs between stages. Each subagent has role-specific model and permission policies — read-only agents cannot edit files, implementation agents receive explicitly scoped permissions appropriate to their assigned role, and the orchestrator itself cannot use tools that bypass delegation.
 
+The `/planning` command is designed to maintain project intent, stable requirements, phase plans, decisions, verification evidence, and resumable state under `.planning/`. The Orchestrator's permission policy limits planning edits to that directory; delegated agents receive the relevant phase context rather than the complete planning history. Post-restart runtime verification remains a separate checkpoint.
+
 ### Custom Agent Team
 
 | Agent                                 | Role                                                                |
@@ -86,7 +88,7 @@ A library of composable skills covers standard development workflows:
 - **Capability security review** — assess manifests, skills, MCPs, plugins, and credentials before capability enablement.
 - **Baseline-failure classification** — prove whether a validation failure predates the current change without repairing unrelated source.
 
-Custom commands: `/remember` (store project facts), `/recall` (search past sessions), `/capability-doctor` (diagnose capability system state).
+Custom commands: `/planning` (manage persistent project and phase state), `/remember` (store project facts), `/recall` (search past sessions), `/capability-doctor` (diagnose capability system state).
 
 ### Review and Validation
 

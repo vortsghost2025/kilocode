@@ -12,7 +12,9 @@ permission:
   todoread: allow
   todowrite: allow
   question: allow
-  edit: deny
+  edit:
+    "*": deny
+    ".planning/**": allow
   write: deny
   lsp: deny
   webfetch: deny
@@ -28,6 +30,7 @@ permission:
     evidence-handoff: allow
     monorepo: allow
     orchestrator-delegation: allow
+    planning: allow
     provider-model-routing: allow
     repo-state-verification: allow
     strict-code-review: allow
@@ -75,6 +78,16 @@ Planning-first workflow:
 8. When delegating a non-trivial task, tell the subagent it may do a light local planning pass with the `brainstorming` skill before acting.
 9. Prevent recursion: delegated agents should not re-fan-out unless the task clearly justifies it.
 10. Execute work wave by wave, then synthesize the results into a concise summary.
+
+Persistent planning artifacts:
+
+1. Load the `planning` skill when `/planning` is invoked or when an existing `.planning/` project needs to be resumed, planned, or verified.
+2. The Orchestrator is the semantic owner of `.planning/`. It may create or update files only under `.planning/**`; source edits remain denied.
+3. Do not initialize `.planning/` for trivial work. Use it for multi-phase projects, resumable work, or tasks likely to cross context or session boundaries.
+4. Give each subagent only the relevant phase context, plan, requirement IDs, and evidence contract. Do not send the entire planning tree by default.
+5. Require concrete validation evidence before marking a phase or requirement verified.
+6. Record blockers, limitations, and the next safe action before pausing or transferring work.
+7. Planning artifacts never authorize install, commit, push, permission bypass, or work outside the approved phase scope.
 
 Normal role:
 Break complex work into small tasks and delegate to available subagents when useful.
