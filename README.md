@@ -6,42 +6,127 @@
   <a href="https://www.reddit.com/r/kilocode/"><img src="https://raster.shields.io/badge/Join%20r%2Fkilocode-D84315?style=flat&logo=reddit&logoColor=white" alt="Reddit" height="20"></a>
 </p>
 
-# 🚀 Kilo
+# Kilo Code — Sean's Agent Runtime Fork
 
-> Kilo is the all-in-one agentic engineering platform. Build, ship, and iterate faster with the most popular open source coding agent.
-> [#1 coding agent on OpenRouter](https://openrouter.ai/apps/category/coding). 1.5M+ Kilo Coders. 25T+ tokens processed
+> This repository is a customized fork of [Kilo Code](https://github.com/Kilo-Org/kilocode), itself a fork of [OpenCode](https://github.com/anomalyco/opencode). The original upstream projects are the foundation — this fork adds reliable, auditable multi-agent orchestration with strict role boundaries and evidence-based validation.
 
-- ✨ Generate code from natural language
-- ✅ Checks its own work
-- 🧪 Run terminal commands
-- 🌐 Automate the browser
-- ⚡ Inline autocomplete suggestions
-- 🤖 Latest AI models
-- 🎁 API keys optional
-- 💡 **Get $20 in bonus credits when you top-up for the first time** Credits can be used with 500+ models like Gemini 3.1 Pro, Claude 4.6 Sonnet & Opus, and GPT-5.4
+## Purpose
+
+The fork focuses on making multi-agent software development more predictable and verifiable. It provides:
+
+- Deterministic delegation from a primary orchestrator to specialized subagents
+- Strict read-only enforcement for review and analysis roles
+- Foreground and background task lifecycle management with ownership-safe cancellation
+- Capability isolation with allow-list enforcement at every boundary
+- Persistent project memory with prompt-injection hardening
+- A library of composable skills for standard development workflows
+
+## What This Fork Adds
+
+### Planning-First Orchestration
+
+A dedicated Orchestrator primary agent coordinates complex work by delegating to specialized subagents. Leading `@agent` mentions route deterministically through the task tool, preserving the full delegated prompt. The orchestrator handles failure fallback and produces structured evidence handoffs between stages. Each subagent has role-specific model and permission policies — read-only agents cannot edit files, write-only agents cannot read outside scope, and the orchestrator itself cannot use tools that bypass delegation.
+
+### Custom Agent Team
+
+| Agent                                 | Role                                                                |
+| ------------------------------------- | ------------------------------------------------------------------- |
+| **Orchestrator**                      | Primary coordinator — delegates, tracks progress, collects results  |
+| **Reviewer**                          | Read-only code review of diffs, commits, tests, and regression risk |
+| **Repository Architecture Explainer** | Read-only codebase exploration and architectural analysis           |
+| **Command Check**                     | Read-only command/output runner for verification tasks              |
+| **Failing Test Triage**               | Read-only test failure diagnosis                                    |
+| **Git Operations**                    | Safe git workflow specialist for branch management                  |
+| **Phase 2F Implementer**              | Scoped implementation agent supervised by the orchestrator          |
+| **Freeprobe**                         | Temporary test agent for evaluating model/tool behavior             |
+| **Translator**                        | Translation agent (migrated from upstream `.opencode/` location)    |
+
+### Foreground and Background Task Runtime
+
+Subagent sessions run under a managed lifecycle:
+
+- **Foreground child lifecycle** — ownership-tracked sessions with reactive interruption. The currently proven operational workflow uses one foreground subagent sequentially per delegation step.
+- **Background task registry** — state machine with `created → started → running → completed/cancelled` transitions. Tasks are tracked by handle for exact lifecycle control.
+- **Exact start acknowledgement** — a background task is not reported as running until the child process confirms readiness.
+- **Completion tracking** — results and errors are captured per task handle.
+- **Ownership-safe cancellation** — only the owning session or the top-level orchestrator can cancel a task. Child sessions cannot cancel sibling tasks.
+- **Interrupt queue, gate, resume, and cleanup** — foreground subagents can be interrupted, queued, and resumed through a deterministic state machine.
+- **Provider-failure cleanup** — tasks that fail due to upstream provider errors are cleaned up without leaking child sessions.
+- **Duplicate-dispatch protection** — the same agent cannot be dispatched to the same task in parallel.
+
+### Capability and Permission Enforcement
+
+Every agent action is scoped by a capability system:
+
+- **Capability manifests, loader, and registry** — capabilities are declared in manifests, loaded from the project, and registered before use.
+- **Role-scoped skill policies** — each agent role has an allow-list of skills it may invoke.
+- **Production tool-resolution boundaries** — tools are resolved against the active capability set before execution.
+- **Nested batch enforcement** — batch tool operations respect individual capability boundaries per sub-operation.
+- **MCP allow-list enforcement** — only explicitly permitted MCP servers can be initialized. Client initialization is serialized to prevent races and properly cleaned up on interruption.
+- **Fail-closed behavior** — if capability resolution fails, the operation is denied; there is no default-allow fallback.
+
+### Persistent Memory and MCP Isolation
+
+- **Durable project memory** — key-value storage with recall and remember commands (`/remember`, `/recall`) and corresponding tools (`kilo_local_remember`, `kilo_local_recall`). Data persists across sessions in filesystem-based JSON storage.
+- **Prompt-injection hardening** — memory content is sanitized on both read and write to prevent injection into agent prompts.
+- **MCP isolation** — runtime configuration can enable Context7 (remote) and persistent memory (local `@modelcontextprotocol/server-memory`) MCP services. These are activated through external profile configuration, not committed source. A `kilo mcp doctor` command provides redacted diagnostics without leaking connection details.
+
+### Skills and Commands
+
+A library of composable skills covers standard development workflows:
+
+- **Fork hygiene preflight** — validates kilocode_change annotations, source links, formatting, and upstream compatibility before committing.
+- **OpenCode patterns** — reference for the eight key TypeScript patterns used throughout the codebase.
+- **Testing** — focused test selection, bun test patterns, fixture setup, and sanitization-test conventions.
+- **Debugging** — reproduce, read stack bottom-up, bisect, confirm before fixing.
+- **Filesystem safety** — safe file operations in this source build.
+- **Code review** — checklist covering security, correctness, tests, upstream hygiene.
+- **Repository-state verification** — worktree, branch, commit, status, remotes verification.
+- **Provider/model routing** — provider and model selection without exposing secret values.
+- **Capability security review** — assess manifests, skills, MCPs, plugins, and credentials before capability enablement.
+- **Baseline-failure classification** — prove whether a validation failure predates the current change without repairing unrelated source.
+
+Custom commands: `/remember` (store project facts), `/recall` (search past sessions), `/capability-doctor` (diagnose capability system state).
+
+### Review and Validation
+
+The `/review` command routes through the read-only Reviewer subagent for structured diff and commit review. Focused test selection identifies the smallest tests that directly validate changed behavior. Baseline-failure classification separates pre-existing failures from regressions introduced by current changes. All modifications to shared upstream files are annotated with `kilocode_change` markers for clean merge tracking. Local and remote Git hashes are verified after pushes, and push safeguards prevent accidental pushes to `main`.
+
+### Prompt Cache Visibility
+
+The TUI sidebar displays real-time prompt cache metrics:
+
+- **Cache-read tokens** — tokens served from the provider's cache
+- **Cache-write tokens** — tokens written to the provider's cache
+- **Cached-input share** — proportion of the current prompt served from cache
+- **Estimated cache-read savings** — approximate cost reduction from cached reads
+
+These metrics use provider-published pricing tables to estimate savings. The display is accessible via sidebar labels and is hidden when no cache activity is present. The formatting logic is tested in isolation with focused pure tests.
+
+## Current Development Status
+
+**Development branch:** `sean/subagent-runtime-a6d1`
+
+- The `main` branch remains at the upstream fork point and is intentionally unchanged by this work.
+- All customizations are developed and validated on the dedicated development branch.
+- Some capability specifications exist as design documents only and are not yet runtime-enabled.
+- The background task runtime supports the current delegation model; unrestricted parallel execution across multiple foreground subagents is not yet the operational default.
+
+## Safety and Development Policy
+
+This fork follows an EDIT → TEST → COMMIT → PUSH DEVELOPMENT BRANCH → VERIFY REMOTE HASH cycle:
+
+- All changes are pushed to the development branch, never to `main`.
+- Force pushes are never used.
+- No secrets, credentials, or personal paths are committed.
+- Read-only agents are enforcement-gated to remain read-only at the permission level.
+- Runtime MCP services require explicit external configuration — they are not activated by committed source alone.
 
 ## Quick Links
 
-- [VS Code Marketplace](https://kilo.ai/vscode-marketplace?utm_source=Readme) (download)
+- [VS Code Marketplace](https://kilo.ai/vscode-marketplace?utm_source=Readme)
 - Install CLI: `npm install -g @kilocode/cli`
-- [Official Kilo.ai Home page](https://kilo.ai) (learn more)
-
-## Key Features
-
-- **Code Generation:** Kilo can generate code using natural language.
-- **Inline Autocomplete:** Get intelligent code completions as you type, powered by AI.
-- **Task Automation:** Kilo can automate repetitive coding tasks to save time.
-- **Automated Refactoring:** Kilo can refactor and improve existing code efficiently.
-- **MCP Server Marketplace**: Kilo can easily find, and use MCP servers to extend the agent capabilities.
-- **Multi Mode**: Plan with Architect, Code with Coder, and Debug with Debugger, and make your own custom modes.
-
-## Get Started in Visual Studio Code
-
-1. Install the Kilo Code extension from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=kilocode.Kilo-Code).
-2. Create your account to access 500+ cutting-edge AI models including Gemini 3.1 Pro, Claude 4.6 Sonnet & Opus, and GPT-5.4 – with transparent pricing that matches provider rates exactly.
-3. Start coding with AI that adapts to your workflow. Watch our quick-start guide to see Kilo in action:
-
-<a href="https://youtu.be/pqGfYXgrhig"><img src="https://img.youtube.com/vi/pqGfYXgrhig/maxresdefault.jpg" alt="Watch the video" width="640" height="360"></a>
+- [Official Kilo.ai Home page](https://kilo.ai)
 
 ## Get Started with the CLI
 
@@ -64,6 +149,7 @@ On some systems and npm versions, installing `@kilocode/cli` can create a hidden
 - Why it exists: npm may create helper artifacts while wiring CLI executables.
 - Size caveat: size can vary by platform, npm version, and install mode (symlink vs copied launcher), so a strict fixed size is not guaranteed.
 - Safety: it is safe to leave in place. Do not edit it manually. Use your package manager's uninstall (`npm uninstall -g @kilocode/cli`) to remove install artifacts cleanly.
+
 <!-- kilocode_change end -->
 
 ### Install from GitHub Releases (Optional)
@@ -97,6 +183,10 @@ kilo run --auto "run tests and fix any failures"
 
 **Important:** The `--auto` flag disables all permission prompts and allows the agent to execute any action without confirmation. Only use this in trusted environments like CI/CD pipelines.
 
+## Upstream Attribution
+
+Kilo Code is a fork of [OpenCode](https://github.com/anomalyco/opencode), enhanced to work within the Kilo agentic engineering platform. This fork builds on both projects. All original license terms apply.
+
 ## Contributing
 
 We welcome contributions from developers, writers, and enthusiasts!
@@ -111,8 +201,4 @@ Our community is built on respect, inclusivity, and collaboration. Please review
 ## License
 
 This project is licensed under the MIT License.
-You’re free to use, modify, and distribute this code, including for commercial purposes as long as you include proper attribution and license notices. See [License](/LICENSE).
-
-### Where did Kilo CLI come from?
-
-Kilo CLI is a fork of [OpenCode](https://github.com/anomalyco/opencode), enhanced to work within the Kilo agentic engineering platform.
+You are free to use, modify, and distribute this code, including for commercial purposes as long as you include proper attribution and license notices. See [License](/LICENSE).
