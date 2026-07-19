@@ -25,7 +25,7 @@ The fork focuses on making multi-agent software development more predictable and
 
 ### Planning-First Orchestration
 
-A dedicated Orchestrator primary agent coordinates complex work by delegating to specialized subagents. Leading `@agent` mentions route deterministically through the task tool, preserving the full delegated prompt. The orchestrator handles failure fallback and produces structured evidence handoffs between stages. Each subagent has role-specific model and permission policies — read-only agents cannot edit files, write-only agents cannot read outside scope, and the orchestrator itself cannot use tools that bypass delegation.
+A dedicated Orchestrator primary agent coordinates complex work by delegating to specialized subagents. Leading `@agent` mentions route deterministically through the task tool, preserving the full delegated prompt. The orchestrator handles failure fallback and produces structured evidence handoffs between stages. Each subagent has role-specific model and permission policies — read-only agents cannot edit files, implementation agents receive explicitly scoped permissions appropriate to their assigned role, and the orchestrator itself cannot use tools that bypass delegation.
 
 ### Custom Agent Team
 
@@ -46,10 +46,10 @@ A dedicated Orchestrator primary agent coordinates complex work by delegating to
 Subagent sessions run under a managed lifecycle:
 
 - **Foreground child lifecycle** — ownership-tracked sessions with reactive interruption. The currently proven operational workflow uses one foreground subagent sequentially per delegation step.
-- **Background task registry** — state machine with `created → started → running → completed/cancelled` transitions. Tasks are tracked by handle for exact lifecycle control.
+- **Background task registry** — task control tracks `prepared`, `starting`, `running`, `completed`, `failed`, and `cancelled` execution states; the public background-task view exposes `queued`, `running`, `completed`, `failed`, and `cancelled` statuses. Tasks are tracked by handle for exact lifecycle control.
 - **Exact start acknowledgement** — a background task is not reported as running until the child process confirms readiness.
 - **Completion tracking** — results and errors are captured per task handle.
-- **Ownership-safe cancellation** — only the owning session or the top-level orchestrator can cancel a task. Child sessions cannot cancel sibling tasks.
+- **Ownership-safe cancellation** — task handles and ownership claims prevent unrelated sessions from controlling another task.
 - **Interrupt queue, gate, resume, and cleanup** — foreground subagents can be interrupted, queued, and resumed through a deterministic state machine.
 - **Provider-failure cleanup** — tasks that fail due to upstream provider errors are cleaned up without leaking child sessions.
 - **Duplicate-dispatch protection** — the same agent cannot be dispatched to the same task in parallel.
@@ -90,11 +90,11 @@ Custom commands: `/remember` (store project facts), `/recall` (search past sessi
 
 ### Review and Validation
 
-The `/review` command routes through the read-only Reviewer subagent for structured diff and commit review. Focused test selection identifies the smallest tests that directly validate changed behavior. Baseline-failure classification separates pre-existing failures from regressions introduced by current changes. All modifications to shared upstream files are annotated with `kilocode_change` markers for clean merge tracking. Local and remote Git hashes are verified after pushes, and push safeguards prevent accidental pushes to `main`.
+The `/review` command routes through the read-only Reviewer subagent for structured diff and commit review. Focused test selection identifies the smallest tests that directly validate changed behavior. Baseline-failure classification separates pre-existing failures from regressions introduced by current changes. New fork-specific changes in shared upstream paths are required to use `kilocode_change` markers for review and merge tracking. Local and remote Git hashes are verified after pushes, and push safeguards prevent accidental pushes to `main`.
 
 ### Prompt Cache Visibility
 
-The TUI sidebar displays real-time prompt cache metrics:
+The TUI sidebar displays prompt-cache metrics for the latest completed assistant response:
 
 - **Cache-read tokens** — tokens served from the provider's cache
 - **Cache-write tokens** — tokens written to the provider's cache
