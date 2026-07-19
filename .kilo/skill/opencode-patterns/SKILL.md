@@ -11,8 +11,9 @@ real in-repo example, and constraints.
 
 ## 1. Namespace modules
 
-One namespace per module file, no classes. Contains Zod schemas, types, and
-functions.
+Each module exports one namespace (not a default export) containing Zod
+schemas, types, and functions. Classes are also used within namespaces where
+appropriate (e.g. Effect Service classes extend `ServiceMap.Service`).
 
 ```ts
 export namespace Session {
@@ -24,8 +25,8 @@ export namespace Session {
 
 Real example: `src/session/message-v2.ts:41` (export namespace MessageV2).
 
-Constraints: flat namespace (no nesting), no default exports, name matches the
-module concept (e.g. `Tool`, `Bus`, `Session`).
+Constraint: flat namespace (no nesting), name matches the module concept (e.g.
+`Tool`, `Bus`, `Session`).
 
 ## 2. `fn(schema, callback)` — Zod-validated function wrapper
 
@@ -94,8 +95,10 @@ export const GlobTool = Tool.define("glob", {
 ```
 
 The `ctx` in execute provides `sessionID`, `messageID`, `agent`, `abort`,
-`ask()`, and `metadata()`. Tool IDs must be unique (registered in
-`ToolRegistry`, `src/tool/registry.ts:40`). All tools live in `src/tool/*.ts`.
+`ask()`, and `metadata()`. Custom tool IDs should avoid colliding with
+built-in IDs (listed in `src/tool/registry.ts:40`). Re-registering an existing
+custom tool ID silently replaces the prior definition
+(`src/tool/registry.ts:152-160`). Built-in tools live in `src/tool/*.ts`.
 
 ## 5. `BusEvent.define(type, schema)` + `Bus.publish()` — In-process pub/sub
 
@@ -119,10 +122,11 @@ Real example: `src/bus/index.ts:13` (`InstanceDisposed` event definition) and
 `src/bus/index.ts:83-98` (publish implementation — writes to typed + wildcard
 PubSub, plus GlobalBus.emit).
 
-Constraints: all events must be defined via `BusEvent.define` so the
-`payloads()` discriminated union stays accurate. `Bus.publish` is async.
-`Bus.subscribe` returns a sync unsubscribe function. For Effect subscribers use
-`Bus.Service` methods returning `Stream.Stream`.
+Constraint: events can be defined from any file — `BusEvent.define` pushes each
+definition into a global registry (`src/bus/bus-event.ts:7`), and `payloads()`
+builds a discriminated union from whatever is registered. `Bus.publish` is
+async; `Bus.subscribe` returns a sync unsubscribe function. For Effect-based
+subscribers use `Bus.Service` methods returning `Stream.Stream`.
 
 ## 6. `NamedError.create(name, schema)` — Structured errors
 
@@ -139,9 +143,10 @@ Real examples: `src/session/message-v2.ts:46` (OutputLengthError, AuthError,
 APIError), `src/storage/storage.ts:18` (NotFoundError), `src/provider/provider.ts:1635`
 (ModelNotFoundError), `src/worktree/index.ts:87` (NotGitError).
 
-Constraints: PascalCase name with descriptive suffix (e.g. `NotFoundError`).
-Narrow schema preferred (`z.object({...})` over `z.any()`). Call at module top
-level (it's a class factory).
+Constraints: convention observed in the codebase favors PascalCase name with
+descriptive suffix (e.g. `NotFoundError`, `AuthError`). Narrow schema
+(`z.object({...})`) helps tool/API consumers handle specific shapes. Call at
+module top level (it's a class factory, not a runtime function).
 
 ## 7. `iife(fn)` — Immediately-invoked function expression
 
@@ -153,8 +158,8 @@ export function iife<T>(fn: () => T) {
 }
 ```
 
-Avoids `let` (prohibited by style guide) when const needs conditional
-initialization.
+Avoids `let` when const needs conditional initialization (style guide prefers
+const; see AGENTS.md "Avoid let statements").
 
 Real example: `src/project/instance.ts:36`
 
@@ -170,8 +175,7 @@ function boot(input) {
 ```
 
 Prefer ternary or `||` when possible; `iife` is for when the init contains
-statements (try/catch, loops, await in a sync-looking path). Prefer extracting
-a named function if the body exceeds ~10 lines.
+statements (try/catch, loops, await in a sync-looking path).
 
 ## 8. `Log.create({ service: "name" })` — Logging
 
@@ -184,6 +188,7 @@ export namespace Log {
 ```
 
 Real example: `src/bus/index.ts:11` (`const log = Log.create({ service: "bus" })`).
-Provides `info`, `warn`, `error`, `debug` methods. Do NOT use `console.log`
-directly. Log structured data as the second argument (object), not string
-interpolation. Do NOT log secrets at `info` level (use `debug`).
+Provides `info`, `warn`, `error`, `debug` methods. Prefer `Log.create` over
+`console.log` for production code (console.log is used in CLI commands and
+scripts, e.g. `src/cli/cmd/db.ts:34-39`). Log structured data as the second
+argument (object), not string interpolation.
