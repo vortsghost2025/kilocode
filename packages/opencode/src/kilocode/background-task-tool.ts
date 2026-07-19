@@ -209,15 +209,17 @@ export const BackgroundTaskTool = Tool.define("background_task", {
     if (agent.mode === "primary") {
       throw new Error(`Agent "${params.subagent_type}" is a primary agent and cannot be used as a subagent`)
     }
+    if (agent.name === "phase2f-implementer") {
+      throw new Error("Phase2F implementation tasks are foreground-only")
+    }
 
     const caller = await Agent.get(ctx.agent)
     const callerSession = await Session.get(ctx.sessionID)
     const callerRules = Permission.merge(caller?.permission ?? [], callerSession.permission ?? [])
     const mcpPrefixes = Object.keys(config.mcp ?? {}).map((k) => k.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")
     const isMcpRule = (p: string) => mcpPrefixes.some((prefix) => p.startsWith(prefix))
-    const inherited = callerRules.filter(
-      (r) => r.permission === "edit" || r.permission === "bash" || isMcpRule(r.permission),
-    )
+    // Bash policy belongs to the selected agent; only shared capability boundaries propagate.
+    const inherited = callerRules.filter((r) => r.permission === "edit" || isMcpRule(r.permission))
     const hasTodoWritePermission = agent.permission.some((rule) => rule.permission === "todowrite")
 
     const msg = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })

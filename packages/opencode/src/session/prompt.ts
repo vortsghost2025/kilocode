@@ -204,8 +204,11 @@ export namespace SessionPrompt {
     }
     // kilocode_change end
     if (permissions.length > 0) {
-      session.permission = permissions
-      await Session.setPermission({ sessionID: session.id, permission: permissions })
+      // kilocode_change start — tool disables must not erase authorization-bound session rules
+      const rules = Permission.merge(session.permission ?? [], permissions)
+      session.permission = rules
+      await Session.setPermission({ sessionID: session.id, permission: rules })
+      // kilocode_change end
     }
 
     if (input.noReply === true) {
@@ -869,7 +872,9 @@ export namespace SessionPrompt {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
 
-    const context = (args: any, options: ToolExecutionOptions): Tool.Context => ({
+    // kilocode_change start
+    const context = (args: any, options: ToolExecutionOptions, op: string): Tool.Context => ({
+      // kilocode_change end
       sessionID: input.session.id,
       abort: options.abortSignal!,
       messageID: input.processor.message.id,
@@ -899,6 +904,7 @@ export namespace SessionPrompt {
         sessionID: input.session.id,
         messageID: input.processor.message.id,
         callID: options.toolCallId,
+        operation: op, // kilocode_change
         agent: input.agent.permission,
         session: input.session.permission ?? [],
       }).ask,
@@ -915,7 +921,7 @@ export namespace SessionPrompt {
         description: item.description,
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
-          const ctx = context(args, options)
+          const ctx = context(args, options, item.id) // kilocode_change
           await Plugin.trigger(
             "tool.execute.before",
             {
@@ -966,7 +972,7 @@ export namespace SessionPrompt {
       item.inputSchema = jsonSchema(transformed)
       // Wrap execute to add plugin hooks and format output
       item.execute = async (args, opts) => {
-        const ctx = context(args, opts)
+        const ctx = context(args, opts, key) // kilocode_change
 
         await Plugin.trigger(
           "tool.execute.before",

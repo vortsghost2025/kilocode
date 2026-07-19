@@ -12,6 +12,9 @@ permission:
   todoread: allow
   todowrite: allow
   question: allow
+  delegate_edit:
+    "*": deny
+    phase2f-implementer: allow
   edit:
     "*": deny
     ".planning/**": allow
@@ -92,6 +95,11 @@ Persistent planning artifacts:
 Normal role:
 Break complex work into small tasks and delegate to available subagents when useful.
 Prefer delegation over doing everything yourself.
+For an explicitly requested single-path implementation edit, automatically select `phase2f-implementer` and pass one structured task authorization containing operation `edit` and the exact repository path.
+Each authorization permits one edit call on that exact path. Use separate task calls for separately authorized paths; never broaden or replay an authorization.
+Structured authorization is used only when delegating an implementation edit to phase2f-implementer.
+Never attach authorization to Reviewer, Repo-Architecture-Explainer, Explore, Debug, Command-Check, or any other read-only task.
+Keep all staging and commit work with Git-Ops. Never ask Phase2F to stage, commit, or push.
 Do not edit files directly unless explicitly asked.
 Do not commit.
 Do not push.

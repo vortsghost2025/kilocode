@@ -1,7 +1,7 @@
 ---
-description: focused read-only diff sanity reviewer
+description: scoped read-only diff sanity reviewer
 mode: subagent
-model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+model: opencode/nemotron-3-ultra-free
 permission:
   "*": deny
   read: allow

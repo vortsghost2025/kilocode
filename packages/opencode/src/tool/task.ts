@@ -12,6 +12,7 @@ import { Config } from "../config/config"
 import { Permission } from "@/permission"
 import { ForegroundTask } from "@/kilocode/foreground-task" // kilocode_change
 import { Log } from "@/util/log" // kilocode_change
+import { DelegatedEdit } from "@/kilocode/delegated-edit" // kilocode_change
 
 // kilocode_change start
 const inFlight = new Map<string, Set<string>>()
@@ -29,6 +30,11 @@ const parameters = z.object({
     )
     .optional(),
   command: z.string().describe("The command that triggered this task").optional(),
+  // kilocode_change start
+  authorization: DelegatedEdit.Authorization.optional().describe(
+    "A one-shot exact-path edit authorization for a scoped implementation subagent",
+  ),
+  // kilocode_change end
 })
 
 // kilocode_change start
@@ -85,6 +91,39 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       // kilocode_change start — reject primary agents; only subagent/all modes allowed
       if (agent.mode === "primary")
         throw new Error(`Agent "${params.subagent_type}" is a primary agent and cannot be used as a subagent`)
+      const phase = agent.name === "phase2f-implementer"
+      if (phase && !params.authorization) throw new Error("Phase2F requires a structured exact-path edit authorization")
+      // kilocode_change end
+
+      // kilocode_change start — validate one-shot edit delegation before creating a child session
+      const authorization = params.authorization
+        ? (() => {
+            if (params.task_id) throw new Error("Delegated edit authorization cannot resume an existing task")
+            if (!ctx.callID) throw new Error("Delegated edit authorization requires a task call ID")
+            const scope = DelegatedEdit.scope(params.authorization)
+            if (Permission.evaluate("edit", scope.path, agent.permission).action !== "allow") {
+              throw new Error(`Agent "${agent.name}" does not allow delegated edits`)
+            }
+            return scope
+          })()
+        : undefined
+      const reservation = authorization
+        ? DelegatedEdit.reserve({ parent: ctx.sessionID, call: ctx.callID!, scope: authorization })
+        : undefined
+      using _reservation = reservation ? defer(() => DelegatedEdit.release(reservation)) : undefined
+      if (authorization) {
+        await ctx.ask({
+          permission: "delegate_edit",
+          patterns: [agent.name],
+          always: [],
+          metadata: {
+            description: params.description,
+            subagent_type: agent.name,
+            operation: authorization.operation,
+            path: authorization.path,
+          },
+        })
+      }
       // kilocode_change end
 
       // kilocode_change start
@@ -108,8 +147,9 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       })
       // kilocode_change end
 
-      // kilocode_change start — inherit edit and bash restrictions from the calling agent so
-      // sub-agents cannot perform actions the parent agent is not allowed to perform.
+      // kilocode_change start — inherit edit and MCP restrictions from the calling agent so
+      // sub-agents cannot exceed the parent's filesystem or external capability boundaries.
+      // Bash remains owned by the selected agent because roles have distinct command policies.
       // We merge the static agent definition with the current session's accumulated permissions
       // so that restrictions survive multi-hop chains (plan → general → explore).
       // Agent.get() gives the base definition; session.permission carries restrictions that
@@ -124,7 +164,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const mcpPrefixes = Object.keys(config.mcp ?? {}).map((k) => k.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")
       const isMcpRule = (p: string) => mcpPrefixes.some((prefix) => p.startsWith(prefix))
       const inherited = callerRules.filter(
-        (r) => r.permission === "edit" || r.permission === "bash" || isMcpRule(r.permission),
+        (r) => (!authorization && r.permission === "edit") || isMcpRule(r.permission),
       )
       // kilocode_change end
       const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
@@ -166,10 +206,19 @@ export const TaskTool = Tool.define("task", async (ctx) => {
               action: "allow" as const,
               permission: t,
             })) ?? []),
-            ...inherited, // kilocode_change — propagate caller's edit and bash restrictions
+            ...inherited, // kilocode_change — propagate caller's edit and MCP restrictions
           ],
         })
       })
+      // kilocode_change start — bind and persist the edit lease before the child prompt starts
+      const binding = reservation ? DelegatedEdit.bind(reservation, session.id) : undefined
+      using _authorization = binding ? defer(binding.release) : undefined
+      if (binding) {
+        const permission = Permission.merge(session.permission ?? [], DelegatedEdit.rules(binding.lease))
+        session.permission = permission
+        await Session.setPermission({ sessionID: session.id, permission })
+      }
+      // kilocode_change end
       const msg = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })
       if (msg.info.role !== "assistant") throw new Error("Not an assistant message")
 
@@ -248,6 +297,13 @@ export const TaskTool = Tool.define("task", async (ctx) => {
             },
             agent: agent.name,
             tools: {
+              // kilocode_change start — Phase2F exposes only EditTool for mutation and delegates validation
+              ...(phase
+                ? { bash: false, write: false, apply_patch: false }
+                : authorization
+                  ? { write: false, apply_patch: false }
+                  : {}),
+              // kilocode_change end
               ...(hasTodoWritePermission ? {} : { todowrite: false }),
               ...(hasTaskPermission ? {} : { task: false }),
               ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((tool) => [tool, false])),

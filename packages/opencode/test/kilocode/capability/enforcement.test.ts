@@ -1741,4 +1741,85 @@ describe("Task permission construction resists injection", () => {
       ;(SessionPrompt as any).prompt = orig
     }
   })
+
+  test("caller bash restrictions do not override the selected agent bash policy", async () => {
+    let childSessionID: string | undefined
+    const orig = (SessionPrompt as any).prompt
+    ;(SessionPrompt as any).prompt = async function (opts: any) {
+      childSessionID = opts.sessionID
+      return { parts: [{ type: "text", text: "done" }] }
+    }
+    try {
+      await using tmp = await tmpdir({
+        git: true,
+        config: {
+          agent: {
+            orchestrator: {
+              mode: "primary",
+              permission: {
+                "*": "deny",
+                task: "allow",
+                edit: "deny",
+                bash: {
+                  "*": "deny",
+                  "git status *": "allow",
+                },
+              },
+            },
+            alpha: {
+              mode: "subagent",
+              permission: {
+                "*": "deny",
+                read: "allow",
+                edit: "allow",
+                bash: {
+                  "*": "deny",
+                  "bun test *": "allow",
+                },
+              },
+            },
+          },
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const selected = await Agent.get("alpha")
+          expect(selected).toBeDefined()
+          const { session, asstId } = await setupInjSession(tmp.path)
+          const tool = await TaskTool.init()
+          await tool.execute(
+            {
+              description: "permission inheritance",
+              prompt: "run the focused tests",
+              subagent_type: "alpha",
+            },
+            {
+              sessionID: session.id,
+              messageID: asstId,
+              callID: "call-bash-inheritance",
+              agent: "orchestrator",
+              abort: AbortSignal.any([]),
+              messages: [],
+              metadata: () => {},
+              ask: async () => {},
+              extra: {},
+            } as any,
+          )
+
+          expect(childSessionID).toBeDefined()
+          const child = await Session.get(SessionID.make(childSessionID!))
+          const rules = child.permission ?? []
+          expect(rules.some((rule) => rule.permission === "bash")).toBe(false)
+          expect(
+            Permission.evaluate("bash", "bun test test/tool/task.test.ts", selected!.permission, rules).action,
+          ).toBe("allow")
+          expect(Permission.evaluate("bash", "npm install", selected!.permission, rules).action).toBe("deny")
+          expect(Permission.evaluate("edit", "src/index.ts", selected!.permission, rules).action).toBe("deny")
+        },
+      })
+    } finally {
+      ;(SessionPrompt as any).prompt = orig
+    }
+  })
 })

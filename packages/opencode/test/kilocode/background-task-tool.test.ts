@@ -303,6 +303,40 @@ describe("BackgroundTaskTool", () => {
     }
   })
 
+  test("start rejects phase2f before background child creation", async () => {
+    const tool = await BackgroundTaskTool.init()
+    const originalConfig = Config.get
+    const originalGet = Agent.get
+    const originalStart = BackgroundSubagentControl.start
+    const state = { starts: 0 }
+
+    configModule.get = async () => cfg()
+    agentModule.get = async (name) => agent({ name, mode: "subagent" })
+    controlModule.start = async (input) => {
+      state.starts++
+      return info({ taskID: "unexpected", status: "running", parentSessionID: input.parentSessionID })
+    }
+
+    try {
+      await expect(
+        tool.execute(
+          {
+            action: "start",
+            description: "forbidden implementation",
+            prompt: "Edit a file",
+            subagent_type: "phase2f-implementer",
+          },
+          ctx(),
+        ),
+      ).rejects.toThrow("Phase2F implementation tasks are foreground-only")
+      expect(state.starts).toBe(0)
+    } finally {
+      configModule.get = originalConfig
+      agentModule.get = originalGet
+      controlModule.start = originalStart
+    }
+  })
+
   test("start performs background and task permission checks and forwards sanitized derived input", async () => {
     const tool = await BackgroundTaskTool.init()
     const originalConfig = Config.get
@@ -325,7 +359,11 @@ describe("BackgroundTaskTool", () => {
     const selected = agent({
       name: "alpha",
       mode: "subagent",
-      permission: [],
+      permission: [
+        { permission: "edit", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: "*", action: "deny" },
+        { permission: "bash", pattern: "bun test *", action: "allow" },
+      ],
       model: {
         modelID: ModelID.make("selected-model"),
         providerID: ProviderID.make("selected-provider"),
@@ -426,9 +464,21 @@ describe("BackgroundTaskTool", () => {
           { permission: "task", pattern: "*", action: "deny" },
           { permission: "background_task", pattern: "*", action: "deny" },
           { permission: "edit", pattern: "src/*", action: "deny" },
-          { permission: "bash", pattern: "*", action: "deny" },
           { permission: "server_issue", pattern: "repo/*", action: "ask" },
         ]),
+      )
+      expect(seen?.permission).toEqual(
+        expect.not.arrayContaining([{ permission: "bash", pattern: "*", action: "deny" }]),
+      )
+      expect(
+        Permission.evaluate("bash", "bun test test/tool/task.test.ts", selected.permission, seen?.permission ?? [])
+          .action,
+      ).toBe("allow")
+      expect(Permission.evaluate("bash", "npm install", selected.permission, seen?.permission ?? []).action).toBe(
+        "deny",
+      )
+      expect(Permission.evaluate("edit", "src/index.ts", selected.permission, seen?.permission ?? []).action).toBe(
+        "deny",
       )
       expect(result.metadata).toEqual({
         background_task_id: "bg_start_1",

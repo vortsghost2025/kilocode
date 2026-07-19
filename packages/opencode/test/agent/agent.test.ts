@@ -258,6 +258,31 @@ test("command-check agent from .kilo/agent/command-check.md loads with correct r
   })
 })
 
+// kilocode_change start
+test("phase2f agent exposes EditTool authority but no Bash or alternate mutation permissions", async () => {
+  await using tmp = await tmpdir({
+    git: true,
+    init: async (dir) => copyAgent(dir, "phase2f-implementer"),
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const phase = await Agent.get("phase2f-implementer")
+      expect(phase).toBeDefined()
+      expect(phase?.mode).toBe("subagent")
+      expect(evalToolPerm(phase, "edit")).toBe("allow")
+      expect(evalToolPerm(phase, "write")).toBe("deny")
+      expect(evalToolPerm(phase, "apply_patch")).toBe("deny")
+      expect(evalToolPerm(phase, "bash")).toBe("deny")
+      expect(Permission.evaluate("bash", "bun test test/tool/task.test.ts", phase!.permission).action).toBe("deny")
+      expect(Permission.evaluate("bash", "git status", phase!.permission).action).toBe("deny")
+      expect(Permission.evaluate("bash", "bunx prettier --check src", phase!.permission).action).toBe("deny")
+    },
+  })
+})
+// kilocode_change end
+
 test("failing-test-triage agent from .kilo/agent/failing-test-triage.md loads with correct read-only permissions", async () => {
   await using tmp = await tmpdir({
     git: true,
