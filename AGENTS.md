@@ -167,6 +167,18 @@ const bazFoo = 3
 You MUST avoid using `mocks` as much as possible.
 Tests MUST test actual implementation, do not duplicate logic into a test.
 
+<!-- kilocode_change start -->
+
+## Deterministic System Map
+
+This repo enforces a deterministic capability-authority system map. Read `START_HERE.md` first.
+
+- `bun run verify:wave-1a` historically verifies the Wave 1A commit delta, including ancestry, exact paths, protected paths, tests, typecheck, formatting, and whitespace. It must pass before implementation work proceeds.
+- `bun run verify:staged-scope -- <wave-id> [--mode=index|commit]` validates an exact staged index or historical commit delta and rejects missing, extra, protected, and duplicate paths.
+- Agent frontmatter `model:` is advisory routing metadata only. Permission decisions MUST NOT trust the claimed model identity.
+
+<!-- kilocode_change end -->
+
 ## Commit Conventions
 
 [Conventional Commits](https://www.conventionalcommits.org/) with scopes matching packages: `vscode`, `cli`, `agent-manager`, `sdk`, `ui`, `i18n`, `kilo-docs`, `gateway`, `telemetry`, `desktop`. Omit scope when spanning multiple packages.

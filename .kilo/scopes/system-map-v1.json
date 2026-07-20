@@ -1,0 +1,27 @@
+{
+  "id": "system-map-v1",
+  "defaultMode": "index",
+  "paths": [
+    ".kilo/protected-paths.json",
+    ".kilo/scopes/system-map-v1.json",
+    ".kilo/scopes/wave-1a.json",
+    "AGENTS.md",
+    "AGENT_REGISTRY.md",
+    "AUTHORITY_MODEL.md",
+    "CHANGE_PROTOCOL.md",
+    "START_HERE.md",
+    "SYSTEM_FLOW.md",
+    "SYSTEM_INDEX.md",
+    "TEST_MATRIX.md",
+    "package.json",
+    "packages/opencode/test/verify/manifest.test.ts",
+    "packages/opencode/test/verify/staged-scope.test.ts",
+    "script/verify/lib/git.ts",
+    "script/verify/lib/manifest.ts",
+    "script/verify/lib/report.ts",
+    "script/verify/lib/scope.ts",
+    "script/verify/staged-scope.ts",
+    "script/verify/wave-1a.ts",
+    "system-manifest.json"
+  ]
+}

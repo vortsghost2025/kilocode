@@ -16,6 +16,8 @@
     "random": "echo 'Random script'",
     "hello": "echo 'Hello World!'",
     "test": "echo 'do not run tests from root' && exit 1",
+    "verify:wave-1a": "bun run script/verify/wave-1a.ts",
+    "verify:staged-scope": "bun run script/verify/staged-scope.ts",
     "extension": "bun --cwd packages/kilo-vscode script/launch.ts"
   },
   "workspaces": {

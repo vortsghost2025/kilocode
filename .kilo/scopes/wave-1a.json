@@ -1,0 +1,87 @@
+{
+  "id": "wave-1a",
+  "modes": {
+    "index": "diff --cached --name-status -z",
+    "commit": "diff --name-status -z <parent> <commit>"
+  },
+  "defaultMode": "index",
+  "commit": "d5ea7d9eb7a5cc1f76ba4abd4c6e137cd66f4eb1",
+  "parent": "6961a8db884c732c766eb2bfac00616f5570606f",
+  "badCommitBlocklist": ["aadd82aaba5c71cdca3ab06173dad8adcd6b7bf9"],
+  "formatter": {
+    "name": "prettier",
+    "version": "3.6.2"
+  },
+  "typecheck": {
+    "command": "cd packages/opencode && bun run typecheck",
+    "acceptedBaseline": [
+      "src/storage/db.node.ts(1,30)",
+      "test/tool/remember.test.ts(49,32)",
+      "test/tool/remember.test.ts(149,32)"
+    ]
+  },
+  "testMatrix": [
+    "test/kilocode/capability/kernel.test.ts",
+    "test/kilocode/capability/lsp-installed-only.test.ts",
+    "test/kilocode/capability/production-resolution.test.ts",
+    "test/kilocode/capability/production-resolution-2.test.ts",
+    "test/kilocode/capability/production-resolution-mcp.test.ts",
+    "test/kilocode/capability/enforcement.test.ts",
+    "test/kilocode/delegated-edit.test.ts",
+    "test/kilocode/background-task-tool.test.ts",
+    "test/kilocode/foreground-task-deadlock.test.ts",
+    "test/kilocode/subagent-interrupt-resume.test.ts"
+  ],
+  "historicalExpected": {
+    "pass": 199,
+    "fail": 0
+  },
+  "liveMinimum": {
+    "pass": 199,
+    "fail": 0
+  },
+  "paths": [
+    ".kilo/agent/command-check.md",
+    "packages/opencode/src/agent/agent.ts",
+    "packages/opencode/src/config/config.ts",
+    "packages/opencode/src/kilocode/background-task-tool.ts",
+    "packages/opencode/src/kilocode/capability/authority-store.ts",
+    "packages/opencode/src/kilocode/capability/authority.ts",
+    "packages/opencode/src/kilocode/delegated-edit.ts",
+    "packages/opencode/src/kilocode/mcp-tool-resolution.ts",
+    "packages/opencode/src/kilocode/permission/drain.ts",
+    "packages/opencode/src/kilocode/permission/tool-ask.ts",
+    "packages/opencode/src/kilocode/session/prompt.ts",
+    "packages/opencode/src/kilocode/subagent-spawn.ts",
+    "packages/opencode/src/lsp/index.ts",
+    "packages/opencode/src/lsp/server.ts",
+    "packages/opencode/src/permission/index.ts",
+    "packages/opencode/src/session/llm.ts",
+    "packages/opencode/src/session/processor.ts",
+    "packages/opencode/src/session/prompt.ts",
+    "packages/opencode/src/session/system.ts",
+    "packages/opencode/src/skill/index.ts",
+    "packages/opencode/src/tool/apply_patch.ts",
+    "packages/opencode/src/tool/batch.ts",
+    "packages/opencode/src/tool/edit.ts",
+    "packages/opencode/src/tool/lsp.ts",
+    "packages/opencode/src/tool/read.ts",
+    "packages/opencode/src/tool/registry.ts",
+    "packages/opencode/src/tool/resolve.ts",
+    "packages/opencode/src/tool/skill.ts",
+    "packages/opencode/src/tool/task.ts",
+    "packages/opencode/src/tool/tool.ts",
+    "packages/opencode/src/tool/write.ts",
+    "packages/opencode/test/kilocode/background-task-tool.test.ts",
+    "packages/opencode/test/kilocode/capability/enforcement.test.ts",
+    "packages/opencode/test/kilocode/capability/kernel.test.ts",
+    "packages/opencode/test/kilocode/capability/lsp-installed-only.test.ts",
+    "packages/opencode/test/kilocode/capability/production-resolution-2.test.ts",
+    "packages/opencode/test/kilocode/capability/production-resolution-mcp.test.ts",
+    "packages/opencode/test/kilocode/capability/production-resolution.test.ts",
+    "packages/opencode/test/kilocode/delegated-edit.test.ts",
+    "packages/opencode/test/kilocode/task-tool-schema.test.ts",
+    "packages/opencode/test/permission/next.test.ts",
+    "packages/opencode/test/preload.ts"
+  ]
+}

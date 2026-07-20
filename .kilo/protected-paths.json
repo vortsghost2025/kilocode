@@ -1,0 +1,12 @@
+{
+  "exact": [
+    ".opencode/opencode.jsonc",
+    "USER_ADDED_INVENTORY.md",
+    "nul",
+    "packages/opencode/forks.json",
+    "packages/opencode/forks_raw.json",
+    "packages/opencode/process_forks.py",
+    "packages/opencode/top10_forks.json"
+  ],
+  "prefix": [".planning/", ".kilo/capability-specs/", ".kilo/plans/"]
+}

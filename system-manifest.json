@@ -1,0 +1,47 @@
+{
+  "mapVersion": 1,
+  "documents": {
+    "START_HERE.md": {
+      "sha256": "f6706e772bcc448824cd306ca8ef8e9807a8a621fb99ca73e020b9575234ea83"
+    },
+    "SYSTEM_INDEX.md": {
+      "sha256": "5fdcc2d845c1485ebfad14c5a867202105014479f0e7941b3145eda3f2ce028a"
+    },
+    "SYSTEM_FLOW.md": {
+      "sha256": "1a0f125bac9f860fa92a1a4377d62afda51380e5dc50e43984d1bf4728e7d9a7"
+    },
+    "AGENT_REGISTRY.md": {
+      "sha256": "bf0c5578dd87535b8ddd3c531f0d1799be4e40395c857cdc40bd3e34ab66487e"
+    },
+    "AUTHORITY_MODEL.md": {
+      "sha256": "cff2071da9673344e75fc6f8d9b48457edbf779401bc4f2aaef212f9dd5fe153"
+    },
+    "TEST_MATRIX.md": {
+      "sha256": "a16fc3d78e12ab6f9a84eba996078813d277f7c5b12896a3536b6290939fe2b4"
+    },
+    "CHANGE_PROTOCOL.md": {
+      "sha256": "dbe1e728f7977299ba6ebaaaaad970779b5a2e070ce95e6fa364752932bd5649"
+    }
+  },
+  "scopes": {
+    "wave-1a": ".kilo/scopes/wave-1a.json",
+    "system-map-v1": ".kilo/scopes/system-map-v1.json"
+  },
+  "protectedPaths": ".kilo/protected-paths.json",
+  "formatter": {
+    "name": "prettier",
+    "version": "3.6.2"
+  },
+  "typecheck": {
+    "command": "cd packages/opencode && bun run typecheck",
+    "acceptedBaseline": [
+      "src/storage/db.node.ts(1,30)",
+      "test/tool/remember.test.ts(49,32)",
+      "test/tool/remember.test.ts(149,32)"
+    ]
+  },
+  "advisory": {
+    "modelRouting": "Agent frontmatter model/provider identity is advisory routing metadata only. Permission and authority decisions MUST NOT trust claimed identity.",
+    "branch": "sean/subagent-runtime-a6d1"
+  }
+}
