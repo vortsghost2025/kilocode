@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "./tool"
 import { ProviderID, ModelID } from "../provider/schema"
 import { Permission } from "../permission" // kilocode_change
+import { CapabilityAuthority } from "@/kilocode/capability/authority" // kilocode_change
 import { errorMessage } from "../util/error"
 import DESCRIPTION from "./batch.txt"
 
@@ -45,13 +46,24 @@ export const BatchTool = Tool.define("batch", async () => {
 
       // kilocode_change start — compute catalog-level disabled set from merged agent+session rules
       const { Agent } = await import("../agent/agent")
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
       const callerAgent = ctx.agent ? await Agent.get(ctx.agent) : undefined
       const callerSession = await Session.get(ctx.sessionID)
+      const policy = ctx.agent ? await Agent.policy(ctx.agent) : []
+      const role = ctx.rules?.role ?? (policy.length > 0 ? policy : (callerAgent?.permission ?? []))
       const mergedRuleset = Permission.merge(callerAgent?.permission ?? [], callerSession.permission ?? [])
-      const hidden = Permission.disabled(
-        params.tool_calls.slice(0, 25).map((c) => c.tool),
-        mergedRuleset,
-      )
+      await AuthorityStore.loadForExecution(ctx.sessionID).catch((err) => {
+        throw new Error(
+          `Authority load failed for batch execution: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      })
+      const hidden = CapabilityAuthority.disabled({
+        tools: params.tool_calls.slice(0, 25).map((c) => c.tool),
+        role,
+        agent: callerAgent?.permission ?? [],
+        session: callerSession.permission,
+        sessionID: ctx.sessionID,
+      })
       // kilocode_change end
 
       const executeCall = async (call: (typeof toolCalls)[0]) => {

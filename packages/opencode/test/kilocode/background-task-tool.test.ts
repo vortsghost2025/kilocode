@@ -6,6 +6,7 @@ import { Identifier } from "../../src/id/id"
 import { BackgroundSubagentControl } from "../../src/kilocode/background-subagent-control"
 import { BackgroundTaskTool } from "../../src/kilocode/background-task-tool"
 import { BackgroundTask } from "../../src/kilocode/background-task"
+import { AuthorityStore } from "../../src/kilocode/capability/authority-store"
 import { Permission } from "../../src/permission"
 import { Instance } from "../../src/project/instance"
 import { ModelID, ProviderID } from "../../src/provider/schema"
@@ -13,9 +14,15 @@ import { Session } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { Tool } from "../../src/tool/tool"
+import { tmpdir } from "../fixture/fixture"
 
 const agentModule = Agent as unknown as {
   get: typeof Agent.get
+  policy: typeof Agent.policy
+}
+
+const authorityModule = AuthorityStore as unknown as {
+  load: typeof AuthorityStore.load
 }
 
 const configModule = Config as unknown as {
@@ -250,7 +257,6 @@ describe("BackgroundTaskTool", () => {
       if (name === "missing") return undefined as never
       return agent({ name, mode: "subagent" })
     }
-
     try {
       await expect(
         tool.execute(
@@ -341,6 +347,8 @@ describe("BackgroundTaskTool", () => {
     const tool = await BackgroundTaskTool.init()
     const originalConfig = Config.get
     const originalGet = Agent.get
+    const originalPolicy = Agent.policy
+    const originalLoad = AuthorityStore.load
     const originalSession = Session.get
     const originalMessage = MessageV2.get
     const originalStart = BackgroundSubagentControl.start
@@ -383,6 +391,8 @@ describe("BackgroundTaskTool", () => {
       if (name === "orchestrator") return caller
       return undefined as never
     }
+    agentModule.policy = async (name) => (name === "orchestrator" ? caller.permission : selected.permission)
+    authorityModule.load = async () => undefined
     sessionModule.get = createSessionGetMock(originalSession, async (_sessionID) =>
       session({
         id: parentSessionID,
@@ -408,91 +418,92 @@ describe("BackgroundTaskTool", () => {
     }
 
     try {
-      const result = await tool.execute(
-        {
-          action: "start",
-          description: "desc",
-          prompt: "prompt",
-          subagent_type: "alpha",
-        },
-        ctx({
-          sessionID: parentSessionID,
-          agent: "orchestrator",
-          async ask(input) {
-            calls.push(input)
-          },
-        }),
-      )
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const result = await tool.execute(
+            {
+              action: "start",
+              description: "desc",
+              prompt: "prompt",
+              subagent_type: "alpha",
+            },
+            ctx({
+              sessionID: parentSessionID,
+              agent: "orchestrator",
+              async ask(input) {
+                calls.push(input)
+              },
+            }),
+          )
 
-      expect(calls).toEqual([
-        {
-          permission: "background_task",
-          patterns: ["alpha"],
-          always: ["*"],
-          metadata: {
-            description: "desc",
-            action: "start",
-          },
+          expect(calls).toEqual([
+            {
+              permission: "background_task",
+              patterns: ["alpha"],
+              always: ["*"],
+              metadata: {
+                description: "desc",
+                action: "start",
+              },
+            },
+            {
+              permission: "task",
+              patterns: ["alpha"],
+              always: ["*"],
+              metadata: {
+                description: "desc",
+                subagent_type: "alpha",
+              },
+            },
+          ])
+          expect(count).toBe(1)
+          expect(seen?.parentSessionID).toBe(parentSessionID)
+          expect(seen?.title).toBe("desc (@alpha background subagent)")
+          expect(seen?.prompt).toBe("prompt")
+          expect(seen?.agent).toBe("alpha")
+          expect(seen?.model).toEqual({
+            modelID: ModelID.make("selected-model"),
+            providerID: ProviderID.make("selected-provider"),
+          })
+          expect(seen?.tools).toEqual({
+            todowrite: false,
+            task: false,
+            background_task: false,
+          })
+          expect(seen?.permission).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ permission: "todowrite", pattern: "*", action: "deny" }),
+              expect.objectContaining({ permission: "task", pattern: "*", action: "deny" }),
+              expect.objectContaining({ permission: "background_task", pattern: "*", action: "deny" }),
+            ]),
+          )
+          const inherited = seen?.authority?.layers.flatMap((layer) => layer.rules) ?? []
+          expect(inherited).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ permission: "bash", pattern: "*", action: "deny" }),
+              expect.objectContaining({ permission: "edit", pattern: "src/*", action: "deny" }),
+              expect.objectContaining({ permission: "server_issue", pattern: "repo/*", action: "ask" }),
+            ]),
+          )
+          expect(result.metadata).toEqual({
+            background_task_id: "bg_start_1",
+            status: "running",
+          })
+          expect(result.output).toBe("background_task_id: bg_start_1\nstatus: running")
+          expectNoLeak(result, {
+            parentSessionID,
+            childSessionID,
+            childUserMessageID,
+          })
         },
-        {
-          permission: "task",
-          patterns: ["alpha"],
-          always: ["*"],
-          metadata: {
-            description: "desc",
-            subagent_type: "alpha",
-          },
-        },
-      ])
-      expect(count).toBe(1)
-      expect(seen?.parentSessionID).toBe(parentSessionID)
-      expect(seen?.title).toBe("desc (@alpha background subagent)")
-      expect(seen?.prompt).toBe("prompt")
-      expect(seen?.agent).toBe("alpha")
-      expect(seen?.model).toEqual({
-        modelID: ModelID.make("selected-model"),
-        providerID: ProviderID.make("selected-provider"),
-      })
-      expect(seen?.tools).toEqual({
-        todowrite: false,
-        task: false,
-        background_task: false,
-      })
-      expect(seen?.permission).toEqual(
-        expect.arrayContaining([
-          { permission: "todowrite", pattern: "*", action: "deny" },
-          { permission: "task", pattern: "*", action: "deny" },
-          { permission: "background_task", pattern: "*", action: "deny" },
-          { permission: "edit", pattern: "src/*", action: "deny" },
-          { permission: "server_issue", pattern: "repo/*", action: "ask" },
-        ]),
-      )
-      expect(seen?.permission).toEqual(
-        expect.not.arrayContaining([{ permission: "bash", pattern: "*", action: "deny" }]),
-      )
-      expect(
-        Permission.evaluate("bash", "bun test test/tool/task.test.ts", selected.permission, seen?.permission ?? [])
-          .action,
-      ).toBe("allow")
-      expect(Permission.evaluate("bash", "npm install", selected.permission, seen?.permission ?? []).action).toBe(
-        "deny",
-      )
-      expect(Permission.evaluate("edit", "src/index.ts", selected.permission, seen?.permission ?? []).action).toBe(
-        "deny",
-      )
-      expect(result.metadata).toEqual({
-        background_task_id: "bg_start_1",
-        status: "running",
-      })
-      expect(result.output).toBe("background_task_id: bg_start_1\nstatus: running")
-      expectNoLeak(result, {
-        parentSessionID,
-        childSessionID,
-        childUserMessageID,
       })
     } finally {
       configModule.get = originalConfig
       agentModule.get = originalGet
+      agentModule.policy = originalPolicy
+      authorityModule.load = originalLoad
       sessionModule.get = originalSession
       messageModule.get = originalMessage
       controlModule.start = originalStart
@@ -503,6 +514,8 @@ describe("BackgroundTaskTool", () => {
     const tool = await BackgroundTaskTool.init()
     const originalConfig = Config.get
     const originalGet = Agent.get
+    const originalPolicy = Agent.policy
+    const originalLoad = AuthorityStore.load
     const originalSession = Session.get
     const originalMessage = MessageV2.get
     const originalStart = BackgroundSubagentControl.start
@@ -519,6 +532,8 @@ describe("BackgroundTaskTool", () => {
       }
       return agent({ name, mode: "all", permission: [] })
     }
+    agentModule.policy = async (name) => (await agentModule.get(name)).permission
+    authorityModule.load = async () => undefined
     sessionModule.get = createSessionGetMock(originalSession, async (_input) => session())
     messageModule.get = createMessageGetMock(originalMessage, async (_input) =>
       assistantMessage({
@@ -536,30 +551,38 @@ describe("BackgroundTaskTool", () => {
     }
 
     try {
-      await tool.execute(
-        {
-          action: "start",
-          description: "desc",
-          prompt: "prompt",
-          subagent_type: "alpha",
-        },
-        ctx(),
-      )
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          await tool.execute(
+            {
+              action: "start",
+              description: "desc",
+              prompt: "prompt",
+              subagent_type: "alpha",
+            },
+            ctx(),
+          )
 
-      expect(seen?.model).toEqual({
-        modelID: ModelID.make("assistant-model"),
-        providerID: ProviderID.make("assistant-provider"),
+          expect(seen?.model).toEqual({
+            modelID: ModelID.make("assistant-model"),
+            providerID: ProviderID.make("assistant-provider"),
+          })
+          expect(seen?.tools).toEqual({
+            task: false,
+            background_task: false,
+          })
+          expect(seen?.permission).toEqual(
+            expect.not.arrayContaining([{ permission: "todowrite", pattern: "*", action: "deny" }]),
+          )
+        },
       })
-      expect(seen?.tools).toEqual({
-        task: false,
-        background_task: false,
-      })
-      expect(seen?.permission).toEqual(
-        expect.not.arrayContaining([{ permission: "todowrite", pattern: "*", action: "deny" }]),
-      )
     } finally {
       configModule.get = originalConfig
       agentModule.get = originalGet
+      agentModule.policy = originalPolicy
+      authorityModule.load = originalLoad
       sessionModule.get = originalSession
       messageModule.get = originalMessage
       controlModule.start = originalStart

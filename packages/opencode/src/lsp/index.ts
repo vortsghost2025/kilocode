@@ -144,6 +144,7 @@ export namespace LSP {
     readonly init: () => Effect.Effect<void>
     readonly status: () => Effect.Effect<Status[]>
     readonly hasClients: (file: string) => Effect.Effect<boolean>
+    readonly installed: (file: string) => Effect.Effect<boolean> // kilocode_change
     readonly touchFile: (input: string, waitForDiagnostics?: boolean) => Effect.Effect<void>
     readonly diagnostics: () => Effect.Effect<Record<string, LSPClient.Diagnostic[]>>
     readonly hover: (input: LocInput) => Effect.Effect<any>
@@ -174,7 +175,18 @@ export namespace LSP {
             log.info("all LSPs are disabled")
           } else {
             for (const server of Object.values(LSPServer)) {
-              servers[server.id] = server
+              // kilocode_change start - policy helpers are exported from the
+              // namespace but are not language-server definitions.
+              if (
+                typeof server !== "object" ||
+                server === null ||
+                !("id" in server) ||
+                typeof server.id !== "string" ||
+                !("spawn" in server)
+              )
+                continue
+              // kilocode_change end
+              servers[server.id] = server as LSPServer.Info // kilocode_change
             }
 
             filterExperimentalServers(servers)
@@ -191,13 +203,19 @@ export namespace LSP {
                 id: name,
                 root: existing?.root ?? (async () => Instance.directory),
                 extensions: item.extensions ?? existing?.extensions ?? [],
-                spawn: async (root) => ({
-                  process: lspspawn(item.command[0], item.command.slice(1), {
-                    cwd: root,
-                    env: { ...process.env, ...item.env },
-                  }),
-                  initialization: item.initialization,
-                }),
+                spawn: async (root) => {
+                  // kilocode_change start - installed-only agent scopes cannot
+                  // bootstrap configured servers through package-manager commands.
+                  if (!LSPServer.canLaunch(item.command[0], item.command.slice(1))) return
+                  return {
+                    process: lspspawn(item.command[0], item.command.slice(1), {
+                      cwd: root,
+                      env: { ...process.env, ...item.env },
+                    }),
+                    initialization: item.initialization,
+                  }
+                  // kilocode_change end
+                },
               }
             }
 
@@ -355,6 +373,15 @@ export namespace LSP {
         })
       })
 
+      // kilocode_change start - resolve an agent-requested server under the
+      // installed-only acquisition policy and report whether one actually ran.
+      const installed = Effect.fn("LSP.installed")(function* (file: string) {
+        return yield* Effect.promise(() =>
+          LSPServer.installedOnly(() => Effect.runPromise(getClients(file))).then((clients) => clients.length > 0),
+        )
+      })
+      // kilocode_change end
+
       const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, waitForDiagnostics?: boolean) {
         log.info("touching file", { file: input })
         const clients = yield* getClients(input)
@@ -492,6 +519,7 @@ export namespace LSP {
         init,
         status,
         hasClients,
+        installed, // kilocode_change
         touchFile,
         diagnostics,
         hover,
@@ -516,6 +544,15 @@ export namespace LSP {
   export const status = async () => runPromise((svc) => svc.status())
 
   export const hasClients = async (file: string) => runPromise((svc) => svc.hasClients(file))
+
+  export const installed = async (file: string) => runPromise((svc) => svc.installed(file)) // kilocode_change
+
+  // kilocode_change start - all agent-facing LSP call chains use this scope so
+  // a later client lookup cannot escape the installed-only acquisition policy.
+  export function installedOnly<T>(fn: () => Promise<T>) {
+    return LSPServer.installedOnly(fn)
+  }
+  // kilocode_change end
 
   export const touchFile = async (input: string, waitForDiagnostics?: boolean) =>
     runPromise((svc) => svc.touchFile(input, waitForDiagnostics))

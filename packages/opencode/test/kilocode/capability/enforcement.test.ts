@@ -15,12 +15,14 @@
  *   ✓ TaskTool execute launch counter (permitted / unknown / disabled)
  *   ✓ BackgroundTaskTool execute launch counter (permitted / denied)
  *   ✓ Task permission construction resists prompt/args injection
+ *   ✓ Authority ceiling invariance proofs (child narrows, resume, forgery)
  *
  * Sections 1–9:  permission-engine unit tests with handcrafted rulesets
  * Sections 10–15: runtime-dispatch integration tests with mock ctx.ask
  * Sections 16–17: measured side-effect counters (Filesystem.write, spawn)
  * Section 18:     production Permission.ask() Effect service path
  * Sections 19–21: TaskTool & BackgroundTaskTool launch counters, injection proof
+ * Section 22:     authority ceiling invariance proofs (child narrows, resume, forgery)
  */
 
 import { test, expect, describe, afterEach, mock } from "bun:test"
@@ -41,6 +43,11 @@ import { TaskTool } from "../../../src/tool/task"
 import { BackgroundTaskTool } from "../../../src/kilocode/background-task-tool"
 import { Filesystem } from "../../../src/util/filesystem"
 import { SessionPrompt } from "../../../src/session/prompt"
+import { CapabilityAuthority } from "../../../src/kilocode/capability/authority"
+import { Database, eq } from "../../../src/storage/db"
+import { SessionTable } from "../../../src/session/session.sql"
+import { ProjectTable } from "../../../src/project/project.sql"
+import { ProjectID } from "../../../src/project/schema"
 
 afterEach(async () => {
   await Instance.disposeAll()
@@ -1742,7 +1749,7 @@ describe("Task permission construction resists injection", () => {
     }
   })
 
-  test("caller bash restrictions do not override the selected agent bash policy", async () => {
+  test("caller bash restrictions remain an inherited ceiling", async () => {
     let childSessionID: string | undefined
     const orig = (SessionPrompt as any).prompt
     ;(SessionPrompt as any).prompt = async function (opts: any) {
@@ -1810,16 +1817,647 @@ describe("Task permission construction resists injection", () => {
           expect(childSessionID).toBeDefined()
           const child = await Session.get(SessionID.make(childSessionID!))
           const rules = child.permission ?? []
-          expect(rules.some((rule) => rule.permission === "bash")).toBe(false)
           expect(
-            Permission.evaluate("bash", "bun test test/tool/task.test.ts", selected!.permission, rules).action,
-          ).toBe("allow")
-          expect(Permission.evaluate("bash", "npm install", selected!.permission, rules).action).toBe("deny")
-          expect(Permission.evaluate("edit", "src/index.ts", selected!.permission, rules).action).toBe("deny")
+            CapabilityAuthority.evaluate({
+              permission: "bash",
+              pattern: "bun test test/tool/task.test.ts",
+              agent: selected!.permission,
+              session: rules,
+              sessionID: child.id,
+            }).action,
+          ).toBe("deny")
+          expect(
+            CapabilityAuthority.evaluate({
+              permission: "bash",
+              pattern: "npm install",
+              agent: selected!.permission,
+              session: rules,
+              sessionID: child.id,
+            }).action,
+          ).toBe("deny")
+          expect(
+            CapabilityAuthority.evaluate({
+              permission: "edit",
+              pattern: "src/index.ts",
+              agent: selected!.permission,
+              session: rules,
+              sessionID: child.id,
+            }).action,
+          ).toBe("deny")
         },
       })
     } finally {
       ;(SessionPrompt as any).prompt = orig
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 22.  AUTHORITY CEILING INVARIANCE PROOFS
+// ---------------------------------------------------------------------------
+describe("Authority ceiling invariance proofs", () => {
+  async function setup(dir: string) {
+    const session = await Session.create({})
+    const uid = MessageID.ascending()
+    const aid = MessageID.ascending()
+    await Session.updateMessage({
+      id: uid,
+      role: "user",
+      sessionID: session.id,
+      agent: "orchestrator",
+      model: { providerID: ProviderID.make("openai"), modelID: ModelID.make("gpt-4") },
+      time: { created: Date.now() },
+    })
+    await Session.updateMessage({
+      id: aid,
+      role: "assistant",
+      parentID: uid,
+      sessionID: session.id,
+      agent: "orchestrator",
+      mode: "orchestrator",
+      path: { cwd: Instance.directory, root: Instance.worktree },
+      time: { created: Date.now() },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ModelID.make("gpt-4"),
+      providerID: ProviderID.make("openai"),
+    })
+    return { session, aid }
+  }
+
+  function authCtx(sessionID: SessionID, messageID: MessageID) {
+    return {
+      sessionID,
+      messageID,
+      callID: "call-auth-ceiling",
+      agent: "orchestrator",
+      abort: AbortSignal.any([]),
+      messages: [],
+      metadata: () => {},
+      ask: async () => {},
+      extra: {},
+    }
+  }
+
+  test("child may narrow inherited permissions further", async () => {
+    let childID: string | undefined
+    const orig = (SessionPrompt as any).prompt
+    ;(SessionPrompt as any).prompt = async function (opts: any) {
+      childID = opts.sessionID
+      return { parts: [{ type: "text", text: "done" }] }
+    }
+    try {
+      await using tmp = await tmpdir({
+        git: true,
+        config: {
+          agent: {
+            orchestrator: { mode: "primary", permission: { "*": "allow", task: "allow" } },
+            beta: { mode: "subagent", permission: { "*": "allow", read: "deny" } },
+          },
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const { session, aid } = await setup(tmp.path)
+          const beta = await Agent.get("beta")
+          expect(beta).toBeDefined()
+          const tool = await TaskTool.init()
+          await tool.execute(
+            { description: "child narrows read", prompt: "inspect only", subagent_type: "beta" },
+            authCtx(session.id, aid) as any,
+          )
+          expect(childID).toBeDefined()
+          const child = await Session.get(SessionID.make(childID!))
+          expect(child).toBeDefined()
+          expect(
+            CapabilityAuthority.evaluate({
+              permission: "read",
+              pattern: "src/index.ts",
+              agent: beta!.permission,
+              session: child.permission,
+              sessionID: child.id,
+            }).action,
+          ).toBe("deny")
+        },
+      })
+    } finally {
+      ;(SessionPrompt as any).prompt = orig
+    }
+  })
+
+  test("resumed child session remains restricted by stored permission", async () => {
+    let childID: string | undefined
+    const orig = (SessionPrompt as any).prompt
+    ;(SessionPrompt as any).prompt = async function (opts: any) {
+      childID = opts.sessionID
+      return { parts: [{ type: "text", text: "done" }] }
+    }
+    try {
+      await using tmp = await tmpdir({
+        git: true,
+        config: {
+          agent: {
+            orchestrator: { mode: "primary", permission: { "*": "deny", task: "allow", read: "allow" } },
+            beta: { mode: "subagent", permission: { "*": "deny", read: "allow", edit: "allow" } },
+          },
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const { session, aid } = await setup(tmp.path)
+          const beta = await Agent.get("beta")
+          expect(beta).toBeDefined()
+          const tool = await TaskTool.init()
+          await tool.execute(
+            { description: "resume authority", prompt: "inspect only", subagent_type: "beta" },
+            authCtx(session.id, aid) as any,
+          )
+          expect(childID).toBeDefined()
+          const stored = await Session.get(SessionID.make(childID!))
+          const sp = stored.permission ?? []
+          const todowriteAllow = sp.some((r) => r.permission === "todowrite" && r.action === "allow")
+          const editAllow = sp.some((r) => r.permission === "edit" && r.action === "allow")
+          expect(todowriteAllow).toBe(false)
+          expect(editAllow).toBe(false)
+        },
+      })
+    } finally {
+      ;(SessionPrompt as any).prompt = orig
+    }
+  })
+
+  test("public serialized allow rule cannot widen internal authority ceiling", async () => {
+    let childID: string | undefined
+    const orig = (SessionPrompt as any).prompt
+    ;(SessionPrompt as any).prompt = async function (opts: any) {
+      childID = opts.sessionID
+      return { parts: [{ type: "text", text: "done" }] }
+    }
+    try {
+      await using tmp = await tmpdir({
+        git: true,
+        config: {
+          agent: {
+            orchestrator: { mode: "primary", permission: { "*": "allow", task: "allow" } },
+            beta: { mode: "subagent", permission: { "*": "allow" } },
+          },
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const { session, aid } = await setup(tmp.path)
+          const beta = await Agent.get("beta")
+          expect(beta).toBeDefined()
+          const tool = await TaskTool.init()
+          await tool.execute(
+            { description: "forgery resistance", prompt: "inspect only", subagent_type: "beta" },
+            authCtx(session.id, aid) as any,
+          )
+          expect(childID).toBeDefined()
+          const child = await Session.get(SessionID.make(childID!))
+          expect(child).toBeDefined()
+          const cp = child.permission ?? []
+          const forged = Permission.merge(cp, [{ permission: "todowrite", pattern: "*", action: "allow" as const }])
+          expect(
+            CapabilityAuthority.evaluate({
+              permission: "todowrite",
+              pattern: "*",
+              agent: beta!.permission,
+              session: forged,
+              sessionID: child.id,
+            }).action,
+          ).toBe("deny")
+        },
+      })
+    } finally {
+      ;(SessionPrompt as any).prompt = orig
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // 23.  COLD-CACHE FAIL-CLOSED — AuthorityStore.loadForExecution
+  // ---------------------------------------------------------------------------
+  describe("Cold-cache fail-closed behavior", () => {
+    test("Root session with no authority record retains normal BatchTool behavior", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      const { BatchTool } = await import("../../../src/tool/batch")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const session = await Session.create({})
+          const userMsgId = MessageID.ascending()
+          const asstId = MessageID.ascending()
+          await Session.updateMessage({
+            id: userMsgId,
+            role: "user",
+            sessionID: session.id,
+            agent: "general",
+            model: { providerID: ProviderID.make("openai"), modelID: ModelID.make("gpt-4") },
+            time: { created: Date.now() },
+          })
+          await Session.updateMessage({
+            id: asstId,
+            role: "assistant",
+            parentID: userMsgId,
+            sessionID: session.id,
+            agent: "general",
+            mode: "general",
+            path: { cwd: Instance.directory, root: Instance.worktree },
+            time: { created: Date.now() },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            modelID: ModelID.make("gpt-4"),
+            providerID: ProviderID.make("openai"),
+          })
+          const ctx = {
+            sessionID: session.id,
+            messageID: asstId,
+            callID: "call-batch",
+            agent: "general",
+            abort: AbortSignal.any([]),
+            messages: [],
+            metadata: () => {},
+            ask: async () => {},
+            rules: { role: [], session: [] },
+          }
+          const tool = await BatchTool.init()
+          const promise = tool.execute(
+            { tool_calls: [{ tool: "read", parameters: { filePath: "README.md" } }] },
+            ctx as any,
+          )
+          await expect(promise).resolves.toBeDefined()
+        },
+      })
+    })
+
+    test("Delegated child with persisted authority and empty memory cache reloads its record", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          const role = [{ permission: "*", pattern: "*", action: "allow" as const }]
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [{ kind: "role", sourceSessionID: parent.id, rules: role }],
+          })
+          AuthorityStore.clear()
+          const loaded = await AuthorityStore.loadForExecution(child.id)
+          expect(loaded).toBeDefined()
+          expect(loaded?.layers).toHaveLength(1)
+        },
+      })
+    })
+
+    test("Parent deny still hides nested tool after cold reload", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          const parentDeny = [{ permission: "task", pattern: "*", action: "deny" as const }]
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [{ kind: "control", sourceSessionID: parent.id, rules: parentDeny }],
+          })
+          AuthorityStore.clear()
+          await AuthorityStore.loadForExecution(child.id)
+          const disabled = CapabilityAuthority.disabled({
+            tools: ["task"],
+            role: [],
+            agent: [],
+            session: [],
+            sessionID: child.id,
+          })
+          expect(disabled.has("task")).toBe(true)
+        },
+      })
+    })
+
+    test("Unexpectedly missing delegated-child record rejects before nested execution", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          AuthorityStore.clear()
+          await expect(AuthorityStore.loadForExecution(child.id)).rejects.toThrow(
+            `Missing authority record for delegated child session ${child.id}`,
+          )
+        },
+      })
+    })
+
+    test("Storage read failure rejects before nested execution", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      const { Storage } = await import("@/storage/storage")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [],
+          })
+          AuthorityStore.clear()
+          const origRead = Storage.read
+          let callCount = 0
+          Storage.read = async <T>(...args: Parameters<typeof Storage.read>) => {
+            callCount++
+            if (args[0][0] === "authority") {
+              throw new Error("Simulated storage corruption")
+            }
+            return origRead.apply(Storage, args) as Promise<T>
+          }
+          try {
+            await expect(AuthorityStore.loadForExecution(child.id)).rejects.toThrow("Authority storage read failed")
+            expect(callCount).toBe(1)
+          } finally {
+            Storage.read = origRead
+          }
+        },
+      })
+    })
+
+    test("Corrupt authority record rejects before nested execution", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      const { Storage } = await import("@/storage/storage")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          const key = ["authority", Instance.project.id, child.id]
+          await Storage.write(key, { corrupt: "data" })
+          AuthorityStore.clear()
+          await expect(AuthorityStore.loadForExecution(child.id)).rejects.toThrow(/Invalid|Zod/)
+        },
+      })
+    })
+
+    test("Child-ID mismatch rejects", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      const { Storage } = await import("@/storage/storage")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [],
+          })
+          const fakeChild = SessionID.make("session_fakechild")
+          const key = ["authority", Instance.project.id, child.id]
+          const stored = await Storage.read<{ childSessionID: string; parentSessionID: string; layers: unknown }>(key)
+          if (!stored) throw new Error("Authority record not found")
+          await Storage.write(key, { ...stored, childSessionID: fakeChild })
+          AuthorityStore.clear()
+          await expect(AuthorityStore.loadForExecution(child.id)).rejects.toThrow(
+            `Authority parent mismatch for child session ${fakeChild}`,
+          )
+        },
+      })
+    })
+
+    test("Parent-ID mismatch rejects", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      const { Storage } = await import("@/storage/storage")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [],
+          })
+          const fakeParent = SessionID.make("session_fakeparent")
+          const key = ["authority", Instance.project.id, child.id]
+          const stored = await Storage.read<{ childSessionID: string; parentSessionID: string; layers: unknown }>(key)
+          if (!stored) throw new Error("Authority record not found")
+          await Storage.write(key, { ...stored, parentSessionID: fakeParent })
+          AuthorityStore.clear()
+          await expect(AuthorityStore.loadForExecution(child.id)).rejects.toThrow("Authority parent mismatch")
+        },
+      })
+    })
+
+    test("Project-binding mismatch rejects", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      await using tmp1 = await tmpdir({ git: true })
+      await using tmp2 = await tmpdir({ git: true })
+      let childID: SessionID | undefined
+      await Instance.provide({
+        directory: tmp1.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          childID = child.id
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [],
+          })
+        },
+      })
+      await Instance.provide({
+        directory: tmp2.path,
+        fn: async () => {
+          if (!childID) throw new Error("Child ID not set")
+          AuthorityStore.clear()
+          await expect(AuthorityStore.loadForExecution(childID)).rejects.toThrow(
+            `Missing authority record for delegated child session ${childID}`,
+          )
+        },
+      })
+    })
+
+    test("Direct project-binding mismatch reaches bound() guard", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [],
+          })
+          const foreignProjectID = ProjectID.make("project_foreign_mismatch")
+          await Database.use((db) =>
+            db.insert(ProjectTable).values({ id: foreignProjectID, worktree: "/fake", sandboxes: [] }).run(),
+          )
+          await Database.use((db) =>
+            db.update(SessionTable).set({ project_id: foreignProjectID }).where(eq(SessionTable.id, child.id)).run(),
+          )
+          AuthorityStore.clear()
+          await expect(AuthorityStore.loadForExecution(child.id)).rejects.toThrow(
+            `Authority parent mismatch for child session ${child.id}`,
+          )
+        },
+      })
+    })
+
+    test("Resumed delegated child remains restricted", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          const parentDeny = [{ permission: "edit", pattern: "*", action: "deny" as const }]
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [{ kind: "control", sourceSessionID: parent.id, rules: parentDeny }],
+          })
+          AuthorityStore.clear()
+          await AuthorityStore.loadForExecution(child.id)
+          const disabled = CapabilityAuthority.disabled({
+            tools: ["edit"],
+            role: [],
+            agent: [],
+            session: [],
+            sessionID: child.id,
+          })
+          expect(disabled.has("edit")).toBe(true)
+        },
+      })
+    })
+
+    test("Background delegated child remains restricted", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          const parentDeny = [{ permission: "background_task", pattern: "*", action: "deny" as const }]
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [{ kind: "control", sourceSessionID: parent.id, rules: parentDeny }],
+          })
+          AuthorityStore.clear()
+          await AuthorityStore.loadForExecution(child.id)
+          const disabled = CapabilityAuthority.disabled({
+            tools: ["background_task"],
+            role: [],
+            agent: [],
+            session: [],
+            sessionID: child.id,
+          })
+          expect(disabled.has("background_task")).toBe(true)
+        },
+      })
+    })
+
+    test("Multi-hop delegated child retains every inherited ceiling", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const grandparent = await Session.create({})
+          const parent = await Session.create({ parentID: grandparent.id })
+          const child = await Session.create({ parentID: parent.id })
+          const gpDeny = [{ permission: "task", pattern: "*", action: "deny" as const }]
+          const pDeny = [{ permission: "background_task", pattern: "*", action: "deny" as const }]
+          await AuthorityStore.create({
+            childSessionID: parent.id,
+            parentSessionID: grandparent.id,
+            layers: [{ kind: "control", sourceSessionID: grandparent.id, rules: gpDeny }],
+          })
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [{ kind: "control", sourceSessionID: parent.id, rules: pDeny }],
+          })
+          const inheritedFromGrandparent = [
+            { kind: "control" as const, sourceSessionID: grandparent.id, rules: gpDeny },
+          ]
+          await AuthorityStore.narrow({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: inheritedFromGrandparent,
+          })
+          AuthorityStore.clear()
+          await AuthorityStore.loadForExecution(child.id)
+          const disabledTask = CapabilityAuthority.disabled({
+            tools: ["task"],
+            role: [],
+            agent: [],
+            session: [],
+            sessionID: child.id,
+          })
+          const disabledBackground = CapabilityAuthority.disabled({
+            tools: ["background_task"],
+            role: [],
+            agent: [],
+            session: [],
+            sessionID: child.id,
+          })
+          expect(disabledTask.has("task")).toBe(true)
+          expect(disabledBackground.has("background_task")).toBe(true)
+        },
+      })
+    })
+
+    test("Public serialized allow rules cannot override the reloaded trusted ceiling", async () => {
+      const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Session.create({})
+          const child = await Session.create({ parentID: parent.id })
+          const parentDeny = [{ permission: "todowrite", pattern: "*", action: "deny" as const }]
+          await AuthorityStore.create({
+            childSessionID: child.id,
+            parentSessionID: parent.id,
+            layers: [{ kind: "control", sourceSessionID: parent.id, rules: parentDeny }],
+          })
+          AuthorityStore.clear()
+          await AuthorityStore.loadForExecution(child.id)
+          const forgedSession = Permission.merge(child.permission ?? [], [
+            { permission: "todowrite", pattern: "*", action: "allow" as const },
+          ])
+          const action = CapabilityAuthority.evaluate({
+            permission: "todowrite",
+            pattern: "*",
+            role: [],
+            agent: [],
+            session: forgedSession,
+            sessionID: child.id,
+          }).action
+          expect(action).toBe("deny")
+        },
+      })
+    })
   })
 })

@@ -11,7 +11,8 @@ import { environmentDetails, type EditorContext } from "@/kilocode/editor-contex
 import { Identifier } from "@/id/id"
 import { Filesystem } from "@/util/filesystem"
 import { Agent } from "@/agent/agent"
-import { Permission } from "@/permission"
+import { CapabilityAuthority } from "@/kilocode/capability/authority"
+import { AuthorityStore } from "@/kilocode/capability/authority-store"
 import { Log } from "@/util/log"
 import PROMPT_PLAN from "@/session/prompt/plan.txt"
 
@@ -212,8 +213,18 @@ export namespace KiloSessionPrompt {
     const target = await Agent.get(lead.name)
     if (!target) return false
 
-    // Check task permission like the existing deterministic path does.
-    const perm = Permission.evaluate("task", lead.name, input.agent.permission)
+    // Check the canonical, effective, session, and inherited task layers.
+    const session = await Session.get(input.sessionID)
+    await AuthorityStore.load(input.sessionID)
+    const policy = await Agent.policy(input.agent.name)
+    const perm = CapabilityAuthority.evaluate({
+      permission: "task",
+      pattern: lead.name,
+      role: policy.length > 0 ? policy : input.agent.permission,
+      agent: input.agent.permission,
+      session: session.permission,
+      sessionID: input.sessionID,
+    })
     if (perm.action === "deny") return false
 
     // Defense in depth: confirm there is a user-provided (non-synthetic) text

@@ -2,10 +2,13 @@ import { Bus } from "@/bus"
 import { Deferred, Effect } from "effect"
 import { Permission } from "@/permission"
 import { ConfigProtection } from "@/kilocode/permission/config-paths"
+import { CapabilityAuthority } from "@/kilocode/capability/authority"
 
 interface PendingEntry {
   info: Permission.Request
   ruleset: Permission.Ruleset
+  role: Permission.Ruleset
+  narrow: Permission.Ruleset
   deferred: Deferred.Deferred<void, Permission.RejectedError | Permission.CorrectedError>
 }
 
@@ -26,7 +29,15 @@ export function drainCovered(
       // Never auto-resolve config file edit permissions
       if (ConfigProtection.isRequest(entry.info)) continue
       const actions = entry.info.patterns.map((pattern: string) =>
-        Permission.evaluate(entry.info.permission, pattern, entry.ruleset, approved),
+        CapabilityAuthority.evaluate({
+          permission: entry.info.permission,
+          pattern,
+          role: entry.role,
+          agent: entry.ruleset,
+          session: entry.narrow,
+          sessionID: entry.info.sessionID,
+          approved,
+        }),
       )
       const denied = actions.some((r: Permission.Rule) => r.action === "deny")
       const allowed = !denied && actions.every((r: Permission.Rule) => r.action === "allow")

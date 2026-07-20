@@ -12,8 +12,8 @@ import PROMPT_GPT from "./prompt/gpt.txt"
 import PROMPT_CODEX from "./prompt/codex.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
 import type { Provider } from "@/provider/provider"
-import type { Agent } from "@/agent/agent"
-import { Permission } from "@/permission"
+import { Agent } from "@/agent/agent" // kilocode_change
+import type { Permission } from "@/permission" // kilocode_change
 import { Skill } from "@/skill"
 
 // kilocode_change start
@@ -78,10 +78,31 @@ export namespace SystemPrompt {
     ]
   }
 
-  export async function skills(agent: Agent.Info) {
-    if (Permission.disabled(["skill"], agent.permission).has("skill")) return
+  // kilocode_change start
+  export async function skills(
+    agent: Agent.Info,
+    permission?: Permission.Ruleset,
+    sessionID?: import("./schema").SessionID,
+  ) {
+    // Inherited ceilings filter skills before their
+    // names and descriptions enter model context.
+    const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
+    if (sessionID) await AuthorityStore.load(sessionID)
+    const { CapabilityAuthority } = await import("@/kilocode/capability/authority")
+    const policy = await Agent.policy(agent.name)
+    const role = policy.length > 0 ? policy : agent.permission
+    if (
+      CapabilityAuthority.disabled({
+        tools: ["skill"],
+        role,
+        agent: agent.permission,
+        session: permission,
+        sessionID,
+      }).has("skill")
+    )
+      return
 
-    const list = await Skill.available(agent)
+    const list = await Skill.available(agent, permission, role, sessionID) // kilocode_change
 
     return [
       "Skills provide specialized instructions and workflows for specific tasks.",
@@ -91,4 +112,5 @@ export namespace SystemPrompt {
       Skill.fmt(list, { verbose: true }),
     ].join("\n")
   }
+  // kilocode_change end
 }

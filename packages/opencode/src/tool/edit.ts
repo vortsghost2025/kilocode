@@ -19,6 +19,7 @@ import { Instance } from "../project/instance"
 import { Snapshot } from "@/snapshot"
 import { assertExternalDirectory } from "./external-directory"
 import { filterDiagnostics } from "./diagnostics" // kilocode_change
+import { CapabilityAuthority } from "@/kilocode/capability/authority" // kilocode_change
 
 const MAX_DIAGNOSTICS_PER_FILE = 20
 const MAX_DIFF_CONTENT = 500_000 // kilocode_change
@@ -160,8 +161,13 @@ export const EditTool = Tool.define("edit", {
     })
 
     let output = "Edit applied successfully."
-    await LSP.touchFile(filePath, true)
-    const diagnostics = await LSP.diagnostics()
+    // kilocode_change start - implicit diagnostics require effective LSP allow
+    // and may acquire only an installed server.
+    const lsp =
+      ctx.rules && CapabilityAuthority.evaluate({ permission: "lsp", pattern: "*", ...ctx.rules }).action === "allow"
+    if (lsp) await LSP.installedOnly(() => LSP.touchFile(filePath, true))
+    const diagnostics = lsp ? await LSP.diagnostics() : {}
+    // kilocode_change end
     const normalizedFilePath = Filesystem.normalizePath(filePath)
     const issues = diagnostics[normalizedFilePath] ?? []
     const errors = issues.filter((item) => item.severity === 1)

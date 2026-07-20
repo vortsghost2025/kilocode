@@ -1185,6 +1185,7 @@ test("ask - abort should clear pending request", async () => {
             metadata: {},
             always: [],
             ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+            role: [],
           }),
         { signal: ctl.signal },
       )

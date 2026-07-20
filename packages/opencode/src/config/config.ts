@@ -1125,7 +1125,13 @@ export namespace Config {
           (data) => {
             if (!data) return true
             if (typeof data === "boolean") return true
-            const serverIds = new Set(Object.values(LSPServer).map((s) => s.id))
+            const serverIds = new Set(
+              Object.values(LSPServer)
+                .map((s) =>
+                  typeof s === "object" && s !== null && "id" in s && typeof s.id === "string" ? s.id : undefined,
+                )
+                .filter((id): id is string => id !== undefined),
+            )
 
             return Object.entries(data).every(([id, config]) => {
               if (config.disabled) return true
@@ -1189,6 +1195,7 @@ export namespace Config {
 
   type State = {
     config: Info
+    definitions: Record<string, Agent> // kilocode_change - canonical Markdown role definitions before config overlays
     directories: string[]
     deps: Promise<void>[]
     warnings: Warning[] // kilocode_change
@@ -1196,6 +1203,7 @@ export namespace Config {
 
   export interface Interface {
     readonly get: () => Effect.Effect<Info>
+    readonly definitions?: () => Effect.Effect<Record<string, Agent>> // kilocode_change
     readonly getGlobal: () => Effect.Effect<Info>
     readonly update: (config: Info) => Effect.Effect<void>
     readonly updateGlobal: (config: Info, options?: { dispose?: boolean }) => Effect.Effect<Info> // kilocode_change
@@ -1429,6 +1437,7 @@ export namespace Config {
           const auth = yield* authSvc.all().pipe(Effect.orDie)
 
           let result: Info = {}
+          const definitions: Record<string, Agent> = {} // kilocode_change
 
           // kilocode_change start — load Kilocode legacy configs (lowest precedence)
           const legacy = yield* Effect.promise(() =>
@@ -1589,9 +1598,14 @@ export namespace Config {
             // kilocode_change start
             yield* Effect.promise(async () => {
               try {
+                // Retain Markdown role policy separately from the merged
+                // cfg.agent view consumed by later overlays.
+                const agents = await loadAgent(dir, warnings)
+                const modes = await loadMode(dir, warnings)
+                Object.assign(definitions, agents, modes)
                 result.command = mergeDeep(result.command ?? {}, await loadCommand(dir, warnings))
-                result.agent = mergeDeep(result.agent ?? {}, await loadAgent(dir, warnings))
-                result.agent = mergeDeep(result.agent, await loadMode(dir, warnings))
+                result.agent = mergeDeep(result.agent ?? {}, agents)
+                result.agent = mergeDeep(result.agent ?? {}, modes)
                 result.plugin!.push(...(await loadPlugin(dir)))
               } catch (err: unknown) {
                 log.error("failed to load config directory", { dir, err })
@@ -1702,6 +1716,7 @@ export namespace Config {
 
           return {
             config: result,
+            definitions, // kilocode_change
             directories,
             deps,
             warnings, // kilocode_change
@@ -1717,6 +1732,12 @@ export namespace Config {
         const get = Effect.fn("Config.get")(function* () {
           return yield* InstanceState.use(state, (s) => s.config)
         })
+
+        // kilocode_change start
+        const definitions = Effect.fn("Config.definitions")(function* () {
+          return yield* InstanceState.use(state, (s) => s.definitions)
+        })
+        // kilocode_change end
 
         const directories = Effect.fn("Config.directories")(function* () {
           return yield* InstanceState.use(state, (s) => s.directories)
@@ -1803,6 +1824,7 @@ export namespace Config {
 
         return Service.of({
           get,
+          definitions, // kilocode_change
           getGlobal,
           update,
           updateGlobal,

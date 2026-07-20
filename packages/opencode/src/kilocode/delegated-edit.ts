@@ -161,10 +161,18 @@ export namespace DelegatedEdit {
     if (input.permission !== "edit") return false
 
     const current = state()
-    const markers = input.session.filter((rule) => rule.permission === "delegate_edit" && rule.action === "allow")
     const binding = current.bindings.get(input.sessionID)
-    if (!binding && markers.length === 0) return false
-    if (!binding || markers.length !== 1 || markers[0]?.pattern !== binding) deny(input.session)
+    const marker = input.session.findLast(
+      (rule) =>
+        rule.permission === "delegate_edit" && rule.action === "allow" && (!binding || rule.pattern === binding),
+    )
+    if (!marker) {
+      if (binding || input.session.some((r) => r.permission === "delegate_edit" && r.action === "allow")) {
+        deny(input.session)
+      }
+      return false
+    }
+    if (!binding || marker.pattern !== binding) deny(input.session)
     const grant = current.grants.get(input.sessionID)
     if (!grant) return deny(input.session)
     if (grant.child !== input.sessionID || binding !== key(grant)) deny(input.session)

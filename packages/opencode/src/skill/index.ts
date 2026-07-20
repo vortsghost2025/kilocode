@@ -19,6 +19,7 @@ import { Log } from "../util/log"
 import { Discovery } from "./discovery"
 import { rm } from "fs/promises" // kilocode_change
 import { BUILTIN_SKILLS } from "../kilocode/skills/builtin" // kilocode_change
+import { CapabilityAuthority } from "../kilocode/capability/authority" // kilocode_change
 
 export namespace Skill {
   const log = Log.create({ service: "skill" })
@@ -65,7 +66,14 @@ export namespace Skill {
     readonly get: (name: string) => Effect.Effect<Info | undefined>
     readonly all: () => Effect.Effect<Info[]>
     readonly dirs: () => Effect.Effect<string[]>
-    readonly available: (agent?: Agent.Info) => Effect.Effect<Info[]>
+    // kilocode_change start
+    readonly available: (
+      agent?: Agent.Info,
+      permission?: Permission.Ruleset,
+      role?: Permission.Ruleset,
+      sessionID?: import("@/session/schema").SessionID,
+    ) => Effect.Effect<Info[]>
+    // kilocode_change end
   }
 
   const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.Interface) {
@@ -232,12 +240,29 @@ export namespace Skill {
         return Array.from(s.dirs)
       })
 
-      const available = Effect.fn("Skill.available")(function* (agent?: Agent.Info) {
+      // kilocode_change start - inherited ceilings filter skill discovery
+      const available = Effect.fn("Skill.available")(function* (
+        agent?: Agent.Info,
+        permission?: Permission.Ruleset,
+        role?: Permission.Ruleset,
+        sessionID?: import("@/session/schema").SessionID,
+      ) {
         const s = yield* InstanceState.get(state)
         const list = Object.values(s.skills).toSorted((a, b) => a.name.localeCompare(b.name))
         if (!agent) return list
-        return list.filter((skill) => Permission.evaluate("skill", skill.name, agent.permission).action !== "deny")
+        return list.filter(
+          (skill) =>
+            CapabilityAuthority.evaluate({
+              permission: "skill",
+              pattern: skill.name,
+              role,
+              agent: agent.permission,
+              session: permission,
+              sessionID,
+            }).action !== "deny",
+        )
       })
+      // kilocode_change end
 
       return Service.of({ get, all, dirs, available })
     }),
@@ -283,9 +308,16 @@ export namespace Skill {
     return runPromise((skill) => skill.dirs())
   }
 
-  export async function available(agent?: Agent.Info) {
-    return runPromise((skill) => skill.available(agent))
+  // kilocode_change start
+  export async function available(
+    agent?: Agent.Info,
+    permission?: Permission.Ruleset,
+    role?: Permission.Ruleset,
+    sessionID?: import("@/session/schema").SessionID,
+  ) {
+    return runPromise((skill) => skill.available(agent, permission, role, sessionID))
   }
+  // kilocode_change end
 
   // kilocode_change start
   export async function remove(location: string) {

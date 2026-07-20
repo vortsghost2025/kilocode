@@ -9,6 +9,7 @@ export namespace ToolAsk {
     messageID: MessageID
     callID: string
     operation?: string
+    role?: Permission.Ruleset
     agent: Permission.Ruleset
     session: Permission.Ruleset
   }): {
@@ -24,12 +25,16 @@ export namespace ToolAsk {
           session: input.session,
         })
         if (delegated) return
-        await Permission.ask({
-          ...req,
-          sessionID: input.sessionID,
-          tool: { messageID: input.messageID, callID: input.callID },
-          ruleset: Permission.merge(input.agent, input.session),
-        })
+        await Permission.ask(
+          {
+            ...req,
+            sessionID: input.sessionID,
+            tool: { messageID: input.messageID, callID: input.callID },
+            ruleset: input.agent,
+            narrow: input.session,
+          },
+          input.role,
+        )
       },
     }
   }

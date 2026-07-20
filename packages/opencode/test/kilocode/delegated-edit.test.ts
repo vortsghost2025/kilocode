@@ -4,6 +4,7 @@ import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundTaskTool } from "../../src/kilocode/background-task-tool"
 import { DelegatedEdit } from "../../src/kilocode/delegated-edit"
+import { AuthorityStore } from "../../src/kilocode/capability/authority-store"
 import { ToolAsk } from "../../src/kilocode/permission/tool-ask"
 import { Permission } from "../../src/permission"
 import { Instance } from "../../src/project/instance"
@@ -519,7 +520,7 @@ describe("delegated edit authorization", () => {
             child = await Session.get(input.sessionID)
             tools = input.tools
             allowed =
-              child.permission?.find(
+              child.permission?.findLast(
                 (rule) => rule.permission === "edit" && rule.action === "allow" && rule.pattern !== "*",
               )?.pattern ?? ""
             const sibling = path.relative(
@@ -820,7 +821,9 @@ describe("delegated edit authorization", () => {
           expect(state.tools).not.toContain("write")
           expect(state.tools).not.toContain("apply_patch")
           const active = await Session.get(state.child!)
-          expect(active.permission?.filter((rule) => rule.permission === "delegate_edit")).toHaveLength(1)
+          expect(
+            active.permission?.filter((rule) => rule.permission === "delegate_edit" && rule.action === "allow"),
+          ).toHaveLength(1)
           expect(DelegatedEdit.inspect(active.id)).toEqual({
             parent: current.session.id,
             child: active.id,
@@ -828,6 +831,23 @@ describe("delegated edit authorization", () => {
             scope: { operation: "edit", path: path.join(".kilo", "agent", "reviewer.md") },
             consumed: false,
           })
+          // Trusted inherited authority lives in the child-bound internal record,
+          // not in public forgeable Permission.Rule storage. The record is bound
+          // to the correct child and parent and carries every restrictive ceiling.
+          const internal = await AuthorityStore.load(active.id)
+          expect(internal).toBeDefined()
+          expect(internal!.childSessionID).toBe(active.id)
+          expect(internal!.parentSessionID).toBe(current.session.id)
+          expect(
+            internal!.layers.some(
+              (layer) =>
+                layer.kind === "control" &&
+                layer.sourceSessionID === current.session.id &&
+                layer.rules.some((rule) => rule.permission === "task" && rule.action === "deny"),
+            ),
+          ).toBe(true)
+          expect(internal!.layers.some((layer) => layer.kind === "role")).toBe(true)
+          expect(internal!.layers.some((layer) => layer.kind === "config")).toBe(true)
           release[0].resolve()
 
           await entered[1].promise
@@ -842,7 +862,9 @@ describe("delegated edit authorization", () => {
           const children = await Session.children(current.session.id)
           expect(children).toHaveLength(1)
           const child = await Session.get(children[0].id)
-          expect(child.permission?.filter((rule) => rule.permission === "delegate_edit")).toHaveLength(1)
+          expect(
+            child.permission?.filter((rule) => rule.permission === "delegate_edit" && rule.action === "allow"),
+          ).toHaveLength(1)
           expect(DelegatedEdit.inspect(child.id)).toBeUndefined()
           expect(await Bun.file(path.join(tmp.path, ".kilo", "agent", "reviewer.md")).text()).toContain(
             "description: scoped read-only diff sanity reviewer",
@@ -928,7 +950,7 @@ describe("delegated edit authorization", () => {
                 extra: {},
               },
             ),
-          ).rejects.toThrow('Agent "reviewer" does not allow delegated edits')
+          ).rejects.toThrow("Delegated edit authorization is restricted to Phase2F implementation tasks")
           expect(prompts).toBe(0)
         },
       })

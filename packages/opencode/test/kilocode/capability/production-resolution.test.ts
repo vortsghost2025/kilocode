@@ -139,7 +139,7 @@ describe("production tool resolution", () => {
         const orchestration = filterResolvedTools({ tools: tools(), agent: orchestrator!.permission })
         expect(orchestration.task).toBeDefined()
         expect(orchestration.background_task).toBeUndefined()
-        expect(orchestration.edit).toBeUndefined()
+        expect(orchestration.edit).toBeDefined()
         expect(orchestration.write).toBeUndefined()
         expect(orchestration.webfetch).toBeUndefined()
         expect(orchestration.websearch).toBeUndefined()
@@ -180,7 +180,7 @@ describe("production tool resolution", () => {
       user: { read: false },
     })
 
-    expect(keys(filtered)).toEqual(["background_task"])
+    expect(keys(filtered)).toEqual([])
     expect(keys(input)).toEqual(["background_task", "read", "task"])
   })
 })

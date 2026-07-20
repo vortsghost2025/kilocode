@@ -5,6 +5,7 @@ import * as path from "path"
 import { createInterface } from "readline"
 import { Tool } from "./tool"
 import { LSP } from "../lsp"
+import { CapabilityAuthority } from "@/kilocode/capability/authority" // kilocode_change
 import { FileTime } from "../file/time"
 import DESCRIPTION from "./read.txt"
 import { Instance } from "../project/instance"
@@ -212,8 +213,12 @@ export const ReadTool = Tool.define("read", {
     }
     output += "\n</content>"
 
-    // just warms the lsp client
-    LSP.touchFile(filepath, false)
+    // kilocode_change start - implicit diagnostics require effective LSP allow
+    // and may warm only an installed server.
+    const lsp =
+      ctx.rules && CapabilityAuthority.evaluate({ permission: "lsp", pattern: "*", ...ctx.rules }).action === "allow"
+    if (lsp) void LSP.installedOnly(() => LSP.touchFile(filepath, false))
+    // kilocode_change end
     await FileTime.read(ctx.sessionID, filepath)
 
     if (instructions.length > 0) {

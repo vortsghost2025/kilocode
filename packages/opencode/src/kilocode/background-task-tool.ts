@@ -7,6 +7,8 @@ import { MessageV2 } from "@/session/message-v2"
 import { Tool } from "@/tool/tool"
 import z from "zod"
 import { BackgroundSubagentControl } from "./background-subagent-control"
+import { CapabilityAuthority } from "./capability/authority"
+import { AuthorityStore } from "./capability/authority-store"
 
 type PublicStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "not_found"
 
@@ -212,14 +214,23 @@ export const BackgroundTaskTool = Tool.define("background_task", {
     if (agent.name === "phase2f-implementer") {
       throw new Error("Phase2F implementation tasks are foreground-only")
     }
+    const selectedPolicy = await Agent.policy(agent.name)
+    const selectedRole = selectedPolicy.length > 0 ? selectedPolicy : agent.permission
 
     const caller = await Agent.get(ctx.agent)
+    const policy = await Agent.policy(ctx.agent)
+    const callerRole = policy.length > 0 ? policy : (caller?.permission ?? [])
     const callerSession = await Session.get(ctx.sessionID)
-    const callerRules = Permission.merge(caller?.permission ?? [], callerSession.permission ?? [])
-    const mcpPrefixes = Object.keys(config.mcp ?? {}).map((k) => k.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")
-    const isMcpRule = (p: string) => mcpPrefixes.some((prefix) => p.startsWith(prefix))
-    // Bash policy belongs to the selected agent; only shared capability boundaries propagate.
-    const inherited = callerRules.filter((r) => r.permission === "edit" || isMcpRule(r.permission))
+    await AuthorityStore.load(ctx.sessionID)
+    // Every parent layer becomes a restrictive child ceiling. Background work
+    // therefore cannot regain tools, shell, network, skills, MCP, LSP, or any
+    // custom capability that the equivalent foreground parent lacks.
+    const inherited = CapabilityAuthority.inherit({
+      role: callerRole,
+      agent: caller?.permission ?? [],
+      session: callerSession.permission,
+      source: ctx.sessionID,
+    })
     const hasTodoWritePermission = agent.permission.some((rule) => rule.permission === "todowrite")
 
     const msg = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })
@@ -230,42 +241,38 @@ export const BackgroundTaskTool = Tool.define("background_task", {
       providerID: msg.info.providerID,
     }
 
+    const bgControl: Permission.Ruleset = []
+    if (!hasTodoWritePermission) {
+      bgControl.push({ permission: "todowrite", pattern: "*", action: "deny" })
+    }
+    bgControl.push({ permission: "task", pattern: "*", action: "deny" })
+    bgControl.push({ permission: "background_task", pattern: "*", action: "deny" })
+
+    const bgPermission: Permission.Ruleset = [
+      ...bgControl,
+      ...(config.experimental?.primary_tools?.map((tool) => ({
+        permission: tool,
+        pattern: "*",
+        action: "allow" as const,
+      })) ?? []),
+    ]
+
+    const layers: AuthorityStore.Layer[] = [
+      ...inherited,
+      { kind: "control", sourceSessionID: ctx.sessionID, rules: bgControl },
+    ]
+
     const info = await BackgroundSubagentControl.start({
       parentSessionID: ctx.sessionID,
       title: params.description + ` (@${agent.name} background subagent)`,
-      permission: [
-        ...(hasTodoWritePermission
-          ? []
-          : [
-              {
-                permission: "todowrite" as const,
-                pattern: "*" as const,
-                action: "deny" as const,
-              },
-            ]),
-        {
-          permission: "task" as const,
-          pattern: "*" as const,
-          action: "deny" as const,
-        },
-        {
-          permission: "background_task" as const,
-          pattern: "*" as const,
-          action: "deny" as const,
-        },
-        ...(config.experimental?.primary_tools?.map((tool) => ({
-          permission: tool,
-          pattern: "*",
-          action: "allow" as const,
-        })) ?? []),
-        ...inherited,
-      ],
+      permission: bgPermission,
       prompt: params.prompt,
       model: {
         modelID: model.modelID,
         providerID: model.providerID,
       },
       agent: agent.name,
+      authority: { layers, role: selectedRole, agent: agent.permission },
       tools: {
         ...(hasTodoWritePermission ? {} : { todowrite: false }),
         task: false,

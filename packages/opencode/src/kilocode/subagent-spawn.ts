@@ -4,6 +4,7 @@ import { SessionPrompt } from "@/session/prompt"
 import { MessageID, SessionID } from "@/session/schema"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Permission } from "@/permission"
+import { AuthorityStore } from "./capability/authority-store"
 
 export namespace SubagentSpawn {
   export interface Input {
@@ -16,6 +17,11 @@ export namespace SubagentSpawn {
       providerID: ProviderID
     }
     agent: string
+    authority?: {
+      layers: AuthorityStore.Layer[]
+      role: Permission.Ruleset
+      agent: Permission.Ruleset
+    }
     tools: Record<string, boolean>
   }
 
@@ -35,6 +41,17 @@ export namespace SubagentSpawn {
       permission: input.permission,
     })
     const childSessionID = session.id
+    if (input.authority) {
+      await AuthorityStore.create({
+        childSessionID,
+        parentSessionID: input.parentSessionID,
+        layers: [
+          ...input.authority.layers,
+          { kind: "role", sourceSessionID: childSessionID, rules: input.authority.role },
+          { kind: "config", sourceSessionID: childSessionID, rules: input.authority.agent },
+        ],
+      })
+    }
     const childUserMessageID = MessageID.ascending()
 
     let resolveCompletion!: (value: { resultMessageID: MessageID }) => void

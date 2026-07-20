@@ -8,7 +8,7 @@ import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
 import { Config } from "@/config/config"
 import { Instance } from "@/project/instance"
-import type { Agent } from "@/agent/agent"
+import { Agent } from "@/agent/agent" // kilocode_change - canonical role policy resolution
 import type { MessageV2 } from "./message-v2"
 import { Plugin } from "@/plugin"
 import { SystemPrompt } from "./system"
@@ -24,6 +24,9 @@ import { Identity } from "@kilocode/kilo-telemetry"
 // kilocode_change end
 import { Installation } from "@/installation"
 import { filterResolvedTools } from "@/tool/resolve" // kilocode_change
+import { DelegatedEdit } from "@/kilocode/delegated-edit" // kilocode_change
+import { SessionID } from "./schema" // kilocode_change
+import { AuthorityStore } from "@/kilocode/capability/authority-store" // kilocode_change
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -340,16 +343,22 @@ export namespace LLM {
     })
   }
 
-  async function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission" | "user">) {
-    // kilocode_change start - share the exact production filter with provider-free tests
+  // kilocode_change start - preserve static and session authority as separate layers
+  async function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission" | "user" | "sessionID">) {
+    const sessionID = SessionID.make(input.sessionID)
+    await AuthorityStore.load(sessionID)
+    const policy = await Agent.policy(input.agent.name)
     return filterResolvedTools({
       tools: input.tools,
+      role: policy.length > 0 ? policy : input.agent.permission,
       agent: input.agent.permission,
       session: input.permission,
+      sessionID,
       user: input.user.tools,
+      delegatedEdit: DelegatedEdit.inspect(sessionID)?.consumed === false,
     })
-    // kilocode_change end
   }
+  // kilocode_change end
 
   // Check if messages contain any tool-call content
   // Used to determine if a dummy tool should be added for LiteLLM proxy compatibility

@@ -14,6 +14,7 @@ import { filterResolvedTools } from "../../../src/tool/resolve"
 import { ToolAsk } from "../../../src/kilocode/permission/tool-ask"
 import { BatchTool } from "../../../src/tool/batch"
 import { BackgroundSubagentControl } from "../../../src/kilocode/background-subagent-control"
+import { CapabilityAuthority } from "../../../src/kilocode/capability/authority"
 import { Skill } from "../../../src/skill"
 import { debugAsk } from "../../../src/cli/cmd/debug/agent"
 import { BashProcess } from "../../../src/tool/bash"
@@ -107,6 +108,7 @@ describe("phase 2E-A2 production resolution hardening", () => {
       directory: tmp.path,
       fn: async () => {
         const orchestrator = await Agent.get("orchestrator")
+        const role = await Agent.policy("orchestrator")
         expect(orchestrator).toBeDefined()
 
         const tools = await ToolRegistry.tools(
@@ -127,23 +129,42 @@ describe("phase 2E-A2 production resolution hardening", () => {
         const catalog = Object.fromEntries(tools.map((tool) => [tool.id, tool]))
         const resolved = filterResolvedTools({
           tools: catalog,
+          role,
           agent: orchestrator!.permission,
         })
 
         expect(resolved.task).toBeDefined()
         expect(resolved.background_task).toBeUndefined()
-        expect(resolved.edit).toBeUndefined()
+        expect(resolved.edit).toBeDefined()
         expect(resolved.write).toBeUndefined()
+        expect(
+          CapabilityAuthority.evaluate({
+            permission: "edit",
+            pattern: ".planning/STATE.md",
+            role,
+            agent: orchestrator!.permission,
+          }).action,
+        ).toBe("allow")
+        expect(
+          CapabilityAuthority.evaluate({
+            permission: "edit",
+            pattern: "src/index.ts",
+            role,
+            agent: orchestrator!.permission,
+          }).action,
+        ).toBe("deny")
 
         const withSession = filterResolvedTools({
           tools: catalog,
+          role,
           agent: orchestrator!.permission,
           session: [{ permission: "background_task", pattern: "*", action: "allow" }],
         })
-        expect(withSession.background_task).toBeDefined()
+        expect(withSession.background_task).toBeUndefined()
 
         const withUserFalse = filterResolvedTools({
           tools: catalog,
+          role,
           agent: orchestrator!.permission,
           user: { task: false },
         })
@@ -188,7 +209,7 @@ describe("phase 2E-A2 production resolution hardening", () => {
         })
         await expect(
           askOverride({ permission: "background_task", patterns: ["explore"], always: ["*"], metadata: {} }),
-        ).resolves.toBeUndefined()
+        ).rejects.toBeInstanceOf(Permission.DeniedError)
 
         const { ask: askDenyOverride } = ToolAsk.build({
           sessionID: session.id,

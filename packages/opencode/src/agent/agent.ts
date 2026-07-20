@@ -56,6 +56,7 @@ export namespace Agent {
 
   export interface Interface {
     readonly get: (agent: string) => Effect.Effect<Agent.Info>
+    readonly policy: (agent: string) => Effect.Effect<Permission.Ruleset> // kilocode_change
     readonly list: () => Effect.Effect<Agent.Info[]>
     readonly defaultAgent: () => Effect.Effect<string>
     readonly generate: (input: {
@@ -82,6 +83,7 @@ export namespace Agent {
       const state = yield* InstanceState.make<State>(
         Effect.fn("Agent.state")(function* (ctx) {
           const cfg = yield* config.get()
+          const definitions = config.definitions ? yield* config.definitions() : {} // kilocode_change
           const skillDirs = yield* skill.dirs()
           const whitelistedDirs = [Truncate.GLOB, ...skillDirs.map((dir) => path.join(dir, "*"))]
 
@@ -258,23 +260,58 @@ export namespace Agent {
           KiloAgent.patchAgents(agents, defaults, user, cfg, kilo)
           // kilocode_change end
 
+          // kilocode_change start - canonical role policy is captured before
+          // cfg.agent overlays. Global permission rules remain an effective
+          // configurable layer and therefore cannot establish role authority.
+          const configured = new Set(user)
+          const policies = new Map<string, Permission.Ruleset>()
+          for (const [name, item] of Object.entries(agents)) {
+            policies.set(
+              name,
+              item.permission.filter((rule) => !configured.has(rule)),
+            )
+          }
+
+          const roles = KiloAgent.preprocessConfig(definitions)
+          for (const [key, value] of Object.entries(roles)) {
+            const role = Permission.fromConfig(value.permission ?? {})
+            const existing = policies.get(key) ?? defaults
+            policies.set(key, Permission.merge(existing, role))
+            if (agents[key]) continue
+            agents[key] = {
+              name: key,
+              mode: value.mode ?? "all",
+              permission: Permission.merge(defaults, user),
+              options: {},
+              native: false,
+            }
+          }
+          // kilocode_change end
+
           // kilocode_change start - preprocess config to remap "build" key → "code"
           const agentConfigs = KiloAgent.preprocessConfig(cfg.agent ?? {})
           for (const [key, value] of Object.entries(agentConfigs)) {
             // kilocode_change end
             if (value.disable) {
               delete agents[key]
+              policies.delete(key) // kilocode_change
               continue
             }
             let item = agents[key]
-            if (!item)
+            // kilocode_change start - the first declaration of a config-only
+            // custom agent establishes its canonical role policy.
+            if (!item) {
+              const declared = Permission.fromConfig(value.permission ?? {})
+              policies.set(key, Permission.merge(defaults, declared))
               item = agents[key] = {
                 name: key,
                 mode: "all",
-                permission: Permission.merge(defaults, user),
+                permission: Permission.merge(defaults, user, declared),
                 options: {},
                 native: false,
               }
+            }
+            // kilocode_change end
             if (value.model) item.model = Provider.parseModel(value.model)
             item.variant = value.variant ?? item.variant
             item.prompt = value.prompt ?? item.prompt
@@ -311,6 +348,12 @@ export namespace Agent {
             return agents[KiloAgent.resolveKey(agent)] // kilocode_change - treat "build" as "code"
           })
 
+          // kilocode_change start
+          const policy = Effect.fnUntraced(function* (agent: string) {
+            return policies.get(KiloAgent.resolveKey(agent)) ?? []
+          })
+          // kilocode_change end
+
           const list = Effect.fnUntraced(function* () {
             const cfg = yield* config.get()
             return pipe(
@@ -344,6 +387,7 @@ export namespace Agent {
 
           return {
             get,
+            policy, // kilocode_change
             list,
             defaultAgent,
           } satisfies State
@@ -354,6 +398,11 @@ export namespace Agent {
         get: Effect.fn("Agent.get")(function* (agent: string) {
           return yield* InstanceState.useEffect(state, (s) => s.get(agent))
         }),
+        // kilocode_change start
+        policy: Effect.fn("Agent.policy")(function* (agent: string) {
+          return yield* InstanceState.useEffect(state, (s) => s.policy(agent))
+        }),
+        // kilocode_change end
         list: Effect.fn("Agent.list")(function* () {
           return yield* InstanceState.useEffect(state, (s) => s.list())
         }),
@@ -435,6 +484,12 @@ export namespace Agent {
   export async function get(agent: string) {
     return runPromise((svc) => svc.get(agent))
   }
+
+  // kilocode_change start
+  export async function policy(agent: string) {
+    return runPromise((svc) => svc.policy(agent))
+  }
+  // kilocode_change end
 
   export async function list() {
     return runPromise((svc) => svc.list())

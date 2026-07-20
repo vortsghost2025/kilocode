@@ -14,6 +14,7 @@ import { Filesystem } from "../util/filesystem"
 import DESCRIPTION from "./apply_patch.txt"
 import { File } from "../file"
 import { filterDiagnostics } from "./diagnostics" // kilocode_change
+import { CapabilityAuthority } from "@/kilocode/capability/authority" // kilocode_change
 import { Format } from "../format"
 
 const PatchParams = z.object({
@@ -233,12 +234,21 @@ export const ApplyPatchTool = Tool.define("apply_patch", {
     }
 
     // Notify LSP of file changes and collect diagnostics
-    for (const change of fileChanges) {
-      if (change.type === "delete") continue
-      const target = change.movePath ?? change.filePath
-      await LSP.touchFile(target, true)
+    // kilocode_change start - implicit diagnostics require effective LSP allow
+    // and changed files may notify installed servers only.
+    const lsp =
+      ctx.rules && CapabilityAuthority.evaluate({ permission: "lsp", pattern: "*", ...ctx.rules }).action === "allow"
+    if (lsp) {
+      await LSP.installedOnly(async () => {
+        for (const change of fileChanges) {
+          if (change.type === "delete") continue
+          const target = change.movePath ?? change.filePath
+          await LSP.touchFile(target, true)
+        }
+      })
     }
-    const diagnostics = await LSP.diagnostics()
+    const diagnostics = lsp ? await LSP.diagnostics() : {}
+    // kilocode_change end
 
     // Generate output summary
     const summaryLines = fileChanges.map((change) => {

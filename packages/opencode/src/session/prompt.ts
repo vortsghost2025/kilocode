@@ -4,6 +4,8 @@ import fs from "fs/promises"
 import { KiloSessionPrompt } from "@/kilocode/session/prompt" // kilocode_change
 import { ForegroundTask } from "@/kilocode/foreground-task" // kilocode_change
 import { ToolAsk } from "@/kilocode/permission/tool-ask" // kilocode_change
+import { CapabilityAuthority } from "@/kilocode/capability/authority" // kilocode_change
+import { AuthorityStore } from "@/kilocode/capability/authority-store" // kilocode_change
 import z from "zod"
 import { Filesystem } from "../util/filesystem"
 import { SessionID, MessageID, PartID } from "./schema"
@@ -488,6 +490,9 @@ export namespace SessionPrompt {
         let executionError: Error | undefined
         // kilocode_change start — unavailable deterministic subtasks become recoverable tool errors
         const taskAgent = await Agent.get(task.agent)
+        const callerAgent = await Agent.get(lastUser.agent)
+        const callerPolicy = await Agent.policy(lastUser.agent)
+        const callerRole = callerPolicy.length > 0 ? callerPolicy : (callerAgent?.permission ?? [])
         if (!taskAgent) {
           const available = await Agent.list().then((agents) => agents.filter((a) => !a.hidden).map((a) => a.name))
           const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
@@ -499,12 +504,18 @@ export namespace SessionPrompt {
           executionError = new Error(error.data.message, { cause: error })
         }
         const taskCtx: Tool.Context = {
-          agent: task.agent,
+          agent: lastUser.agent,
           messageID: assistantMessage.id,
           sessionID: sessionID,
           abort,
           callID: part.callID,
           extra: { bypassAgentCheck: true },
+          rules: {
+            role: callerRole,
+            agent: callerAgent?.permission ?? [],
+            session: session.permission ?? [],
+            sessionID,
+          },
           messages: msgs,
           async metadata(input) {
             part = (await Session.updatePart({
@@ -516,13 +527,14 @@ export namespace SessionPrompt {
               },
             } satisfies MessageV2.ToolPart)) as MessageV2.ToolPart
           },
-          async ask(req) {
-            await Permission.ask({
-              ...req,
-              sessionID: sessionID,
-              ruleset: Permission.merge(taskAgent?.permission ?? [], session.permission ?? []),
-            })
-          },
+          ask: ToolAsk.build({
+            sessionID,
+            messageID: assistantMessage.id,
+            callID: part.callID,
+            role: callerRole,
+            agent: callerAgent?.permission ?? [],
+            session: session.permission ?? [],
+          }).ask,
         }
         const result = taskAgent
           ? await taskTool.execute(taskArgs, taskCtx).catch((error) => {
@@ -763,7 +775,7 @@ export namespace SessionPrompt {
       KiloSessionPrompt.injectEditorContext({ msgs, lastUser, sessionID, cache: envCache })
 
       // Build system prompt, adding structured output instruction if needed
-      const skills = await SystemPrompt.skills(agent)
+      const skills = await SystemPrompt.skills(agent, session.permission, session.id) // kilocode_change
       const system = [
         ...(await SystemPrompt.environment(model, lastUser.editorContext)), // kilocode_change
         ...(skills ? [skills] : []),
@@ -873,6 +885,9 @@ export namespace SessionPrompt {
     const tools: Record<string, AITool> = {}
 
     // kilocode_change start
+    await AuthorityStore.load(input.session.id)
+    const policy = await Agent.policy(input.agent.name)
+    const role = policy.length > 0 ? policy : input.agent.permission
     const context = (args: any, options: ToolExecutionOptions, op: string): Tool.Context => ({
       // kilocode_change end
       sessionID: input.session.id,
@@ -881,6 +896,12 @@ export namespace SessionPrompt {
       callID: options.toolCallId,
       extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck },
       agent: input.agent.name,
+      rules: {
+        role,
+        agent: input.agent.permission,
+        session: input.session.permission ?? [],
+        sessionID: input.session.id,
+      },
       messages: input.messages,
       metadata: async (val: { title?: string; metadata?: any }) => {
         const match = input.processor.partFromToolCall(options.toolCallId)
@@ -905,6 +926,7 @@ export namespace SessionPrompt {
         messageID: input.processor.message.id,
         callID: options.toolCallId,
         operation: op, // kilocode_change
+        role,
         agent: input.agent.permission,
         session: input.session.permission ?? [],
       }).ask,
@@ -914,6 +936,9 @@ export namespace SessionPrompt {
     for (const item of await ToolRegistry.tools(
       { modelID: ModelID.make(input.model.api.id), providerID: input.model.providerID },
       input.agent,
+      input.session.permission, // kilocode_change - initialize context-visible metadata with inherited ceilings
+      role,
+      input.session.id,
     )) {
       const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
       tools[item.id] = tool({
@@ -960,7 +985,10 @@ export namespace SessionPrompt {
 
     // kilocode_change start - skip MCP runtime initialization when every configured namespace is denied
     const mcp = await MCPToolResolution.resolve(
-      Permission.merge(input.agent.permission, input.session.permission ?? []),
+      input.agent.permission,
+      input.session.permission ?? [],
+      input.session.id,
+      role,
     )
     for (const [key, item] of Object.entries(mcp)) {
       // kilocode_change end
@@ -1256,7 +1284,24 @@ export namespace SessionPrompt {
                   // workspace/symbol searches, so we'll try to find the
                   // symbol in the document to get the full range
                   if (start === end) {
-                    const symbols = await LSP.documentSymbol(filePathURI).catch(() => [])
+                    // kilocode_change start - implicit symbol lookup requires
+                    // effective LSP allow and remains installed-only.
+                    const sess = await Session.get(input.sessionID).catch(() => undefined)
+                    const policy = await Agent.policy(agent.name)
+                    const allowed =
+                      sess &&
+                      CapabilityAuthority.evaluate({
+                        permission: "lsp",
+                        pattern: "*",
+                        role: policy.length > 0 ? policy : agent.permission,
+                        agent: agent.permission,
+                        session: sess.permission,
+                        sessionID: sess.id,
+                      }).action === "allow"
+                    const symbols = allowed
+                      ? await LSP.installedOnly(() => LSP.documentSymbol(filePathURI)).catch(() => [])
+                      : []
+                    // kilocode_change end
                     for (const symbol of symbols) {
                       let range: LSP.Range | undefined
                       if ("range" in symbol) {

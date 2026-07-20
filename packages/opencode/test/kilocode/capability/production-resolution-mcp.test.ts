@@ -3,6 +3,7 @@ import { afterEach, expect, spyOn, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { Agent } from "../../../src/agent/agent"
+import type { Config } from "../../../src/config/config"
 import { MCPToolResolution } from "../../../src/kilocode/mcp-tool-resolution"
 import { MCP } from "../../../src/mcp"
 import { Permission } from "../../../src/permission"
@@ -16,6 +17,18 @@ import { resetDatabase } from "../../fixture/db"
 import { tmpdir } from "../../fixture/fixture"
 
 const root = path.resolve(import.meta.dir, "../../../../..")
+const single = {
+  synthetic: { type: "local", command: ["synthetic-never-run"] },
+} satisfies NonNullable<Config.Info["mcp"]>
+const mixed = {
+  ...single,
+  blocked: { type: "local", command: ["blocked-never-run"] },
+  remote: { type: "remote", url: "https://127.0.0.1:1" },
+} satisfies NonNullable<Config.Info["mcp"]>
+const blocked = {
+  "blocked-local": { type: "local", command: ["blocked-local-never-run"] },
+  "blocked-remote": { type: "remote", url: "https://127.0.0.1:1" },
+} satisfies NonNullable<Config.Info["mcp"]>
 
 async function copy(dir: string) {
   const dest = path.join(dir, ".kilo", "agent")
@@ -197,14 +210,64 @@ afterEach(async () => {
   await resetDatabase()
 })
 
+test("missing explicit MCP grant resolves no server or tool", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: single,
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const boundary = boundaries()
+      try {
+        expect(await MCPToolResolution.isolate(single, () => MCPToolResolution.servers([]))).toEqual([])
+        expect(await MCPToolResolution.isolate(single, () => MCPToolResolution.resolve([]))).toEqual({})
+        expect(boundary.scoped).toHaveBeenCalledTimes(0)
+        expect(boundary.clients).toHaveBeenCalledTimes(0)
+        expect(boundary.calls.stdio).toEqual([])
+      } finally {
+        await Instance.dispose()
+        boundary.restore()
+      }
+    },
+  })
+})
+
+test("session ask narrows an explicit MCP allow before server construction", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: single,
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const ruleset: Permission.Ruleset = [
+        { permission: "*", pattern: "*", action: "deny" },
+        { permission: "synthetic_search", pattern: "*", action: "allow" },
+        { permission: "synthetic_write", pattern: "*", action: "deny" },
+      ]
+      const narrow: Permission.Ruleset = [{ permission: "synthetic_search", pattern: "*", action: "ask" }]
+      const boundary = boundaries()
+      try {
+        expect(await MCPToolResolution.isolate(single, () => MCPToolResolution.resolve(ruleset, narrow))).toEqual({})
+        expect(boundary.scoped).toHaveBeenCalledTimes(0)
+        expect(boundary.clients).toHaveBeenCalledTimes(0)
+        expect(boundary.calls.stdio).toEqual([])
+      } finally {
+        await Instance.dispose()
+        boundary.restore()
+      }
+    },
+  })
+})
+
 test("all denied namespaces resolve zero MCP tools without runtime construction", async () => {
   await using tmp = await tmpdir({
     init: copy,
     config: {
-      mcp: {
-        "blocked-local": { type: "local", command: ["blocked-local-never-run"] },
-        "blocked-remote": { type: "remote", url: "https://127.0.0.1:1" },
-      },
+      mcp: blocked,
     },
   })
   await Instance.provide({
@@ -215,7 +278,7 @@ test("all denied namespaces resolve zero MCP tools without runtime construction"
 
       const boundary = boundaries()
       try {
-        const result = await MCPToolResolution.resolve(agent!.permission)
+        const result = await MCPToolResolution.isolate(blocked, () => MCPToolResolution.resolve(agent!.permission))
         expect(result).toEqual({})
         expect(boundary.all).toHaveBeenCalledTimes(0)
         expect(boundary.scoped).toHaveBeenCalledTimes(0)
@@ -235,11 +298,7 @@ test("all denied namespaces resolve zero MCP tools without runtime construction"
 test("mixed configuration initializes only the allowed synthetic server", async () => {
   await using tmp = await tmpdir({
     config: {
-      mcp: {
-        synthetic: { type: "local", command: ["synthetic-never-run"] },
-        blocked: { type: "local", command: ["blocked-never-run"] },
-        remote: { type: "remote", url: "https://127.0.0.1:1" },
-      },
+      mcp: mixed,
     },
   })
   await Instance.provide({
@@ -248,10 +307,11 @@ test("mixed configuration initializes only the allowed synthetic server", async 
       const ruleset: Permission.Ruleset = [
         { permission: "*", pattern: "*", action: "deny" },
         { permission: "synthetic_search", pattern: "*", action: "allow" },
+        { permission: "synthetic_write", pattern: "*", action: "deny" },
       ]
       const boundary = boundaries()
       try {
-        const result = await MCPToolResolution.resolve(ruleset)
+        const result = await MCPToolResolution.isolate(mixed, () => MCPToolResolution.resolve(ruleset))
         expect(Object.keys(result)).toEqual(["synthetic_search"])
         expect(boundary.all).toHaveBeenCalledTimes(0)
         expect(boundary.scoped).toHaveBeenCalledTimes(1)
@@ -262,6 +322,8 @@ test("mixed configuration initializes only the allowed synthetic server", async 
         expect(boundary.calls.http).toEqual([])
         expect(boundary.calls.sse).toEqual([])
         expect(boundary.calls.list).toBe(1)
+        expect(await MCP.inspect("context7")).toEqual({ client: false, defs: false, ready: false })
+        expect(await MCP.inspect("memory")).toEqual({ client: false, defs: false, ready: false })
       } finally {
         await Instance.dispose()
         boundary.restore()
@@ -270,14 +332,10 @@ test("mixed configuration initializes only the allowed synthetic server", async 
   })
 })
 
-test("parameter-specific MCP allowance initializes only its server", async () => {
+test("parameter-specific MCP allowance stays unavailable without argument enforcement", async () => {
   await using tmp = await tmpdir({
     config: {
-      mcp: {
-        synthetic: { type: "local", command: ["synthetic-never-run"] },
-        blocked: { type: "local", command: ["blocked-never-run"] },
-        remote: { type: "remote", url: "https://127.0.0.1:1" },
-      },
+      mcp: mixed,
     },
   })
   await Instance.provide({
@@ -289,15 +347,14 @@ test("parameter-specific MCP allowance initializes only its server", async () =>
       ]
       const boundary = boundaries()
       try {
-        const result = await MCPToolResolution.resolve(ruleset)
-        expect(Object.keys(result)).toEqual(["synthetic_search"])
-        expect(boundary.scoped).toHaveBeenCalledWith(["synthetic"])
-        expect(boundary.clients).toHaveBeenCalledTimes(1)
-        expect(boundary.calls.stdio).toEqual(["synthetic-never-run"])
-        expect(boundary.calls.stdio).not.toContain("blocked-never-run")
+        const result = await MCPToolResolution.isolate(mixed, () => MCPToolResolution.resolve(ruleset))
+        expect(result).toEqual({})
+        expect(boundary.scoped).toHaveBeenCalledTimes(0)
+        expect(boundary.clients).toHaveBeenCalledTimes(0)
+        expect(boundary.calls.stdio).toEqual([])
         expect(boundary.calls.http).toEqual([])
         expect(boundary.calls.sse).toEqual([])
-        expect(boundary.calls.list).toBe(1)
+        expect(boundary.calls.list).toBe(0)
       } finally {
         await Instance.dispose()
         boundary.restore()
@@ -309,9 +366,7 @@ test("parameter-specific MCP allowance initializes only its server", async () =>
 test("later equivalent deny supersedes an earlier parameter-specific allow", async () => {
   await using tmp = await tmpdir({
     config: {
-      mcp: {
-        synthetic: { type: "local", command: ["synthetic-never-run"] },
-      },
+      mcp: single,
     },
   })
   await Instance.provide({
@@ -319,13 +374,13 @@ test("later equivalent deny supersedes an earlier parameter-specific allow", asy
     fn: async () => {
       const ruleset: Permission.Ruleset = [
         { permission: "*", pattern: "*", action: "deny" },
-        { permission: "synthetic_search", pattern: "safe-query", action: "allow" },
-        { permission: "synthetic_search", pattern: "safe-query", action: "deny" },
+        { permission: "synthetic_search", pattern: "*", action: "allow" },
+        { permission: "synthetic_search", pattern: "*", action: "deny" },
       ]
       const boundary = boundaries()
       try {
-        expect(await MCPToolResolution.servers(ruleset)).toEqual([])
-        expect(await MCPToolResolution.resolve(ruleset)).toEqual({})
+        expect(await MCPToolResolution.isolate(single, () => MCPToolResolution.servers(ruleset))).toEqual([])
+        expect(await MCPToolResolution.isolate(single, () => MCPToolResolution.resolve(ruleset))).toEqual({})
         expect(boundary.scoped).toHaveBeenCalledTimes(0)
         expect(boundary.clients).toHaveBeenCalledTimes(0)
         expect(boundary.calls.stdio).toEqual([])
@@ -341,11 +396,7 @@ test("later equivalent deny supersedes an earlier parameter-specific allow", asy
 test("question wildcard permission selects only the overlapping server namespace", async () => {
   await using tmp = await tmpdir({
     config: {
-      mcp: {
-        synthetic: { type: "local", command: ["synthetic-never-run"] },
-        blocked: { type: "local", command: ["blocked-never-run"] },
-        remote: { type: "remote", url: "https://127.0.0.1:1" },
-      },
+      mcp: mixed,
     },
   })
   await Instance.provide({
@@ -353,12 +404,14 @@ test("question wildcard permission selects only the overlapping server namespace
     fn: async () => {
       const ruleset: Permission.Ruleset = [
         { permission: "*", pattern: "*", action: "deny" },
-        { permission: "synthetic?search", pattern: "safe-query", action: "allow" },
+        { permission: "synthetic?search", pattern: "*", action: "allow" },
       ]
       const boundary = boundaries()
       try {
-        expect(await MCPToolResolution.servers(ruleset)).toEqual(["synthetic"])
-        expect(Object.keys(await MCPToolResolution.resolve(ruleset))).toEqual(["synthetic_search"])
+        expect(await MCPToolResolution.isolate(mixed, () => MCPToolResolution.servers(ruleset))).toEqual(["synthetic"])
+        expect(Object.keys(await MCPToolResolution.isolate(mixed, () => MCPToolResolution.resolve(ruleset)))).toEqual([
+          "synthetic_search",
+        ])
         expect(boundary.scoped).toHaveBeenCalledWith(["synthetic"])
         expect(boundary.calls.stdio).toEqual(["synthetic-never-run"])
         expect(boundary.calls.stdio).not.toContain("blocked-never-run")
@@ -376,11 +429,7 @@ test("question wildcard permission selects only the overlapping server namespace
 test("SessionPrompt production path merges agent and session MCP permissions", async () => {
   await using tmp = await tmpdir({
     config: {
-      mcp: {
-        synthetic: { type: "local", command: ["synthetic-never-run"] },
-        blocked: { type: "local", command: ["blocked-never-run"] },
-        remote: { type: "remote", url: "https://127.0.0.1:1" },
-      },
+      mcp: mixed,
     },
   })
   await Instance.provide({
@@ -390,24 +439,29 @@ test("SessionPrompt production path merges agent and session MCP permissions", a
         name: "synthetic",
         mode: "primary",
         options: {},
-        permission: [{ permission: "*", pattern: "*", action: "deny" }],
+        permission: [
+          { permission: "*", pattern: "*", action: "deny" },
+          { permission: "synthetic_search", pattern: "*", action: "allow" },
+        ],
       }
       const session = await Session.create({
-        permission: [{ permission: "synthetic_search", pattern: "*", action: "allow" }],
+        permission: [{ permission: "blocked_search", pattern: "*", action: "allow" }],
       })
       const boundary = boundaries()
       try {
-        const result = await SessionPrompt.resolveTools({
-          agent,
-          session,
-          model: model(),
-          processor: {
-            message: { id: MessageID.ascending() },
-            partFromToolCall() {},
-          } as never,
-          bypassAgentCheck: false,
-          messages: [],
-        })
+        const result = await MCPToolResolution.isolate(mixed, () =>
+          SessionPrompt.resolveTools({
+            agent,
+            session,
+            model: model(),
+            processor: {
+              message: { id: MessageID.ascending() },
+              partFromToolCall() {},
+            } as never,
+            bypassAgentCheck: false,
+            messages: [],
+          }),
+        )
         expect(result.synthetic_search).toBeDefined()
         expect(result.blocked_search).toBeUndefined()
         expect(result.remote_search).toBeUndefined()
@@ -418,6 +472,51 @@ test("SessionPrompt production path merges agent and session MCP permissions", a
         expect(boundary.calls.http).toEqual([])
         expect(boundary.calls.sse).toEqual([])
         expect(boundary.calls.list).toBe(1)
+      } finally {
+        await Instance.dispose()
+        boundary.restore()
+      }
+    },
+  })
+})
+
+test("SessionPrompt removes session-granted MCP tools behind a static deny before serialization", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      mcp: single,
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const agent: Agent.Info = {
+        name: "synthetic",
+        mode: "primary",
+        options: {},
+        permission: [{ permission: "synthetic_search", pattern: "*", action: "deny" }],
+      }
+      const session = await Session.create({
+        permission: [{ permission: "synthetic_search", pattern: "*", action: "allow" }],
+      })
+      const boundary = boundaries()
+      try {
+        const result = await MCPToolResolution.isolate(single, () =>
+          SessionPrompt.resolveTools({
+            agent,
+            session,
+            model: model(),
+            processor: {
+              message: { id: MessageID.ascending() },
+              partFromToolCall() {},
+            } as never,
+            bypassAgentCheck: false,
+            messages: [],
+          }),
+        )
+        expect(result.synthetic_search).toBeUndefined()
+        expect(boundary.scoped).toHaveBeenCalledTimes(0)
+        expect(boundary.clients).toHaveBeenCalledTimes(0)
+        expect(boundary.calls.stdio).toEqual([])
       } finally {
         await Instance.dispose()
         boundary.restore()

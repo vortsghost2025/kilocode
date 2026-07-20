@@ -13,29 +13,43 @@ import { Permission } from "@/permission"
 import { ForegroundTask } from "@/kilocode/foreground-task" // kilocode_change
 import { Log } from "@/util/log" // kilocode_change
 import { DelegatedEdit } from "@/kilocode/delegated-edit" // kilocode_change
+import { CapabilityAuthority } from "@/kilocode/capability/authority" // kilocode_change
+import { AuthorityStore } from "@/kilocode/capability/authority-store" // kilocode_change
 
 // kilocode_change start
 const inFlight = new Map<string, Set<string>>()
 const log = Log.create({ service: "tool.task" })
 // kilocode_change end
 
-const parameters = z.object({
+// kilocode_change start - express optional call metadata as exact variants so
+// schema normalizers cannot promote every declared property to required.
+const shape = {
   description: z.string().describe("A short (3-5 words) description of the task"),
   prompt: z.string().describe("The task for the agent to perform"),
   subagent_type: z.string().describe("The type of specialized agent to use for this task"),
-  task_id: z
-    .string()
-    .describe(
-      "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
-    )
-    .optional(),
-  command: z.string().describe("The command that triggered this task").optional(),
-  // kilocode_change start
-  authorization: DelegatedEdit.Authorization.optional().describe(
-    "A one-shot exact-path edit authorization for a scoped implementation subagent",
-  ),
-  // kilocode_change end
-})
+}
+const resume = z
+  .string()
+  .describe(
+    "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
+  )
+const command = z.string().describe("The command that triggered this task")
+const grant = DelegatedEdit.Authorization.describe(
+  "A one-shot exact-path edit authorization for a scoped implementation subagent",
+)
+const parameters = z
+  .union([
+    z.object(shape).strict(),
+    z.object({ ...shape, task_id: resume }).strict(),
+    z.object({ ...shape, command }).strict(),
+    z.object({ ...shape, task_id: resume, command }).strict(),
+    z.object({ ...shape, authorization: grant }).strict(),
+    z.object({ ...shape, command, authorization: grant }).strict(),
+    z.object({ ...shape, task_id: resume, authorization: grant }).strict(),
+    z.object({ ...shape, task_id: resume, command, authorization: grant }).strict(),
+  ])
+  .meta({ type: "object" })
+// kilocode_change end
 
 // kilocode_change start
 type ForegroundOutcome =
@@ -56,9 +70,22 @@ export const TaskTool = Tool.define("task", async (ctx) => {
 
   // Filter agents by permissions if agent provided
   const caller = ctx?.agent
+  // kilocode_change start - inherited task ceilings also constrain the agent
+  // names serialized into the TaskTool description.
   const accessibleAgents = caller
-    ? agents.filter((a) => Permission.evaluate("task", a.name, caller.permission).action !== "deny")
+    ? agents.filter(
+        (a) =>
+          CapabilityAuthority.evaluate({
+            permission: "task",
+            pattern: a.name,
+            role: ctx.role,
+            agent: caller.permission,
+            session: ctx.permission,
+            sessionID: ctx.sessionID,
+          }).action !== "deny",
+      )
     : agents
+  // kilocode_change end
   const list = accessibleAgents.toSorted((a, b) => a.name.localeCompare(b.name))
 
   const description = DESCRIPTION.replace(
@@ -72,9 +99,48 @@ export const TaskTool = Tool.define("task", async (ctx) => {
     parameters,
     async execute(params: z.infer<typeof parameters>, ctx) {
       const config = await Config.get()
+      const phase = params.subagent_type === "phase2f-implementer" // kilocode_change
+      const resume = "task_id" in params ? params.task_id : undefined // kilocode_change
+      const grant = "authorization" in params ? params.authorization : undefined // kilocode_change
+
+      // kilocode_change start - the one-shot lease is a Phase2F-only authority
+      // layer, and only Orchestrator may issue it.
+      if (grant && !phase) {
+        throw new Error("Delegated edit authorization is restricted to Phase2F implementation tasks")
+      }
+      if (phase && ctx.agent !== "orchestrator") {
+        throw new Error("Only Orchestrator may authorize Phase2F implementation tasks")
+      }
+      // kilocode_change end
+
+      // kilocode_change start - preserve the real caller identity and all
+      // persisted narrowing layers at both invocation and child construction.
+      const caller = await Agent.get(ctx.agent)
+      const policy = await Agent.policy(ctx.agent)
+      const callerRole = policy.length > 0 ? policy : (caller?.permission ?? [])
+      const callerSession = await Session.get(ctx.sessionID)
+      await AuthorityStore.load(ctx.sessionID)
+      // kilocode_change end
 
       // Skip permission check when user explicitly invoked via @ or command subtask
-      if (!ctx.extra?.bypassAgentCheck) {
+      // kilocode_change start
+      if (ctx.extra?.bypassAgentCheck) {
+        // A direct user mention may satisfy an ask, but
+        // it is not authority to cross the caller's static or inherited deny.
+        const rule = CapabilityAuthority.evaluate({
+          permission: "task",
+          pattern: params.subagent_type,
+          role: callerRole,
+          agent: caller?.permission ?? [],
+          session: callerSession.permission,
+          sessionID: ctx.sessionID,
+        })
+        if (rule.action === "deny") {
+          throw new Permission.DeniedError({
+            ruleset: Permission.merge(caller?.permission ?? [], callerSession.permission ?? []),
+          })
+        }
+      } else {
         await ctx.ask({
           permission: "task",
           patterns: [params.subagent_type],
@@ -85,23 +151,32 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           },
         })
       }
+      // kilocode_change end
 
       const agent = await Agent.get(params.subagent_type)
       if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
+      const selectedPolicy = await Agent.policy(agent.name) // kilocode_change
+      const selectedRole = selectedPolicy.length > 0 ? selectedPolicy : agent.permission // kilocode_change
       // kilocode_change start — reject primary agents; only subagent/all modes allowed
       if (agent.mode === "primary")
         throw new Error(`Agent "${params.subagent_type}" is a primary agent and cannot be used as a subagent`)
-      const phase = agent.name === "phase2f-implementer"
-      if (phase && !params.authorization) throw new Error("Phase2F requires a structured exact-path edit authorization")
+      if (phase && !grant) throw new Error("Phase2F requires a structured exact-path edit authorization")
       // kilocode_change end
 
       // kilocode_change start — validate one-shot edit delegation before creating a child session
-      const authorization = params.authorization
+      const authorization = grant
         ? (() => {
-            if (params.task_id) throw new Error("Delegated edit authorization cannot resume an existing task")
+            if (resume) throw new Error("Delegated edit authorization cannot resume an existing task")
             if (!ctx.callID) throw new Error("Delegated edit authorization requires a task call ID")
-            const scope = DelegatedEdit.scope(params.authorization)
-            if (Permission.evaluate("edit", scope.path, agent.permission).action !== "allow") {
+            const scope = DelegatedEdit.scope(grant)
+            if (
+              CapabilityAuthority.evaluate({
+                permission: "edit",
+                pattern: scope.path,
+                role: selectedRole,
+                agent: agent.permission,
+              }).action !== "allow"
+            ) {
               throw new Error(`Agent "${agent.name}" does not allow delegated edits`)
             }
             return scope
@@ -147,68 +222,83 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       })
       // kilocode_change end
 
-      // kilocode_change start — inherit edit and MCP restrictions from the calling agent so
-      // sub-agents cannot exceed the parent's filesystem or external capability boundaries.
-      // Bash remains owned by the selected agent because roles have distinct command policies.
-      // We merge the static agent definition with the current session's accumulated permissions
-      // so that restrictions survive multi-hop chains (plan → general → explore).
-      // Agent.get() gives the base definition; session.permission carries restrictions that
-      // were themselves inherited from a grandparent, so both sources are needed.
-      const caller = await Agent.get(ctx.agent)
-      const callerSession = await Session.get(ctx.sessionID)
-      const callerRules = Permission.merge(caller?.permission ?? [], callerSession.permission ?? [])
-      // Build the set of MCP server prefixes (e.g. "servername_") so we can
-      // include both server-wide wildcards ("servername_*") and specific MCP tool
-      // permissions ("servername_create_issue") in the inherited ruleset.
-      // Same sanitisation logic as agent.ts.
-      const mcpPrefixes = Object.keys(config.mcp ?? {}).map((k) => k.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")
-      const isMcpRule = (p: string) => mcpPrefixes.some((prefix) => p.startsWith(prefix))
-      const inherited = callerRules.filter(
-        (r) => (!authorization && r.permission === "edit") || isMcpRule(r.permission),
-      )
+      // kilocode_change start - persist every parent authority layer as a
+      // restrictive ceiling. The selected child policy remains its own static
+      // ceiling, and verified delegated-edit leases stay outside this ordinary
+      // intersection so only their exact EditTool call can cross it.
+      const inherited = CapabilityAuthority.inherit({
+        role: callerRole,
+        agent: caller?.permission ?? [],
+        session: callerSession.permission,
+        source: ctx.sessionID,
+      })
       // kilocode_change end
       const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
       const hasTodoWritePermission = agent.permission.some((rule) => rule.permission === "todowrite")
+      // kilocode_change start - control rules and parent ceilings are applied
+      // identically to new and resumed child sessions.
+      const restrictions: Permission.Ruleset = [
+        ...(hasTodoWritePermission ? [] : [{ permission: "todowrite", pattern: "*", action: "deny" as const }]),
+        ...(hasTaskPermission ? [] : [{ permission: "task", pattern: "*", action: "deny" as const }]),
+        { permission: "task", pattern: "*", action: "deny" as const },
+        { permission: "background_task", pattern: "*", action: "deny" as const },
+        ...(config.experimental?.primary_tools?.map((tool) => ({
+          pattern: "*",
+          action: "allow" as const,
+          permission: tool,
+        })) ?? []),
+      ]
+      const controlRules: Permission.Ruleset = []
+      if (!hasTodoWritePermission) {
+        controlRules.push({ permission: "todowrite", pattern: "*", action: "deny" })
+      }
+      if (!hasTaskPermission) {
+        controlRules.push({ permission: "task", pattern: "*", action: "deny" })
+      }
+      controlRules.push({ permission: "task", pattern: "*", action: "deny" })
+      controlRules.push({ permission: "background_task", pattern: "*", action: "deny" })
+      const layers: AuthorityStore.Layer[] = [
+        ...inherited,
+        { kind: "control", sourceSessionID: ctx.sessionID, rules: controlRules },
+      ]
+      // kilocode_change end
 
       const session = await iife(async () => {
-        if (params.task_id) {
-          const found = await Session.get(SessionID.make(params.task_id)).catch(() => {})
-          if (found) return found
+        // kilocode_change start
+        if (resume) {
+          const found = await Session.get(SessionID.make(resume)).catch(() => undefined)
+          if (found) {
+            if (found.parentID !== ctx.sessionID) throw new Error("Cannot resume a task outside its parent session")
+            const permission = Permission.merge(found.permission ?? [], restrictions)
+            found.permission = permission
+            await Session.setPermission({ sessionID: found.id, permission })
+            await AuthorityStore.narrow({
+              childSessionID: found.id,
+              parentSessionID: ctx.sessionID,
+              layers,
+            })
+            return found
+          }
         }
+        // kilocode_change end
 
-        return await Session.create({
+        // kilocode_change start
+        const child = await Session.create({
           parentID: ctx.sessionID,
           title: params.description + ` (@${agent.name} subagent)`,
-          permission: [
-            ...(hasTodoWritePermission
-              ? []
-              : [
-                  {
-                    permission: "todowrite" as const,
-                    pattern: "*" as const,
-                    action: "deny" as const,
-                  },
-                ]),
-            ...(hasTaskPermission
-              ? []
-              : [
-                  {
-                    permission: "task" as const,
-                    pattern: "*" as const,
-                    action: "deny" as const,
-                  },
-                ]),
-            // kilocode_change start — unconditionally deny task for all subagent sessions
-            { permission: "task", pattern: "*", action: "deny" },
-            // kilocode_change end
-            ...(config.experimental?.primary_tools?.map((t) => ({
-              pattern: "*",
-              action: "allow" as const,
-              permission: t,
-            })) ?? []),
-            ...inherited, // kilocode_change — propagate caller's edit and MCP restrictions
+          permission: restrictions, // kilocode_change - selected policy without ceiling tags
+        })
+        await AuthorityStore.create({
+          childSessionID: child.id,
+          parentSessionID: ctx.sessionID,
+          layers: [
+            ...layers,
+            { kind: "role", sourceSessionID: child.id, rules: selectedRole },
+            { kind: "config", sourceSessionID: child.id, rules: agent.permission },
           ],
         })
+        return child
+        // kilocode_change end
       })
       // kilocode_change start — bind and persist the edit lease before the child prompt starts
       const binding = reservation ? DelegatedEdit.bind(reservation, session.id) : undefined

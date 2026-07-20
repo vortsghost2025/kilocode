@@ -15,9 +15,34 @@ import { Process } from "../util/process"
 import { which } from "../util/which"
 import { Module } from "@opencode-ai/util/module"
 import { spawn } from "./launch"
+import { AsyncLocalStorage } from "node:async_hooks" // kilocode_change
 
 export namespace LSPServer {
   const log = Log.create({ service: "lsp.server" })
+  // kilocode_change start - agent-triggered LSP use runs in an installed-only
+  // async scope. Existing binaries may start, but every download/build/package
+  // manager branch below fails closed before mutation.
+  const policy = new AsyncLocalStorage<{ install: boolean }>()
+  export function installedOnly<T>(fn: () => Promise<T>) {
+    return policy.run({ install: false }, fn)
+  }
+  export function canInstall() {
+    return policy.getStore()?.install !== false && !Flag.KILO_DISABLE_LSP_DOWNLOAD
+  }
+  export function canLaunch(command: string, args: string[] = []) {
+    if (canInstall()) return true
+    const name = path
+      .basename(command)
+      .toLowerCase()
+      .replace(/\.(cmd|exe)$/u, "")
+    if (["npm", "npx", "pnpm", "pnpx", "yarn", "bun", "bunx", "corepack"].includes(name)) return false
+    const action = args.slice(0, 2).join(" ").toLowerCase()
+    if (["go", "gem", "cargo", "pip", "pip3", "uv"].includes(name) && action.startsWith("install")) return false
+    if (name === "dotnet" && action.startsWith("tool install")) return false
+    if (name === "mix" && ["deps.get", "compile"].includes(args[0]?.toLowerCase() ?? "")) return false
+    return true
+  }
+  // kilocode_change end
   const pathExists = async (p: string) =>
     fs
       .stat(p)
@@ -137,7 +162,7 @@ export namespace LSPServer {
           "vue-language-server.js",
         )
         if (!(await Filesystem.exists(js))) {
-          if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+          if (!canInstall()) return // kilocode_change
           await Process.spawn([BunProc.which(), "install", "@vue/language-server"], {
             cwd: Global.Path.bin,
             env: {
@@ -179,7 +204,7 @@ export namespace LSPServer {
       log.info("spawning eslint server")
       const serverPath = path.join(Global.Path.bin, "vscode-eslint", "server", "out", "eslintServer.js")
       if (!(await Filesystem.exists(serverPath))) {
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("downloading and building VS Code ESLint server")
         const response = await fetch("https://github.com/microsoft/vscode-eslint/archive/refs/heads/main.zip")
         if (!response.ok) return
@@ -376,7 +401,7 @@ export namespace LSPServer {
       })
       if (!bin) {
         if (!which("go")) return
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
 
         log.info("installing gopls")
         const proc = Process.spawn(["go", "install", "golang.org/x/tools/gopls@latest"], {
@@ -418,7 +443,7 @@ export namespace LSPServer {
           log.info("Ruby not found, please install Ruby first")
           return
         }
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("installing rubocop")
         const proc = Process.spawn(["gem", "install", "rubocop", "--bindir", Global.Path.bin], {
           stdout: "pipe",
@@ -517,7 +542,7 @@ export namespace LSPServer {
       if (!binary) {
         const js = path.join(Global.Path.bin, "node_modules", "pyright", "dist", "pyright-langserver.js")
         if (!(await Filesystem.exists(js))) {
-          if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+          if (!canInstall()) return // kilocode_change
           await Process.spawn([BunProc.which(), "install", "pyright"], {
             cwd: Global.Path.bin,
             env: {
@@ -583,7 +608,7 @@ export namespace LSPServer {
             return
           }
 
-          if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+          if (!canInstall()) return // kilocode_change
           log.info("downloading elixir-ls from GitHub releases")
 
           const response = await fetch("https://github.com/elixir-lsp/elixir-ls/archive/refs/heads/master.zip")
@@ -640,7 +665,7 @@ export namespace LSPServer {
           return
         }
 
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("downloading zls from GitHub releases")
 
         const releaseResponse = await fetch("https://api.github.com/repos/zigtools/zls/releases/latest")
@@ -750,7 +775,7 @@ export namespace LSPServer {
           return
         }
 
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("installing csharp-ls via dotnet tool")
         const proc = Process.spawn(["dotnet", "tool", "install", "csharp-ls", "--tool-path", Global.Path.bin], {
           stdout: "pipe",
@@ -789,7 +814,7 @@ export namespace LSPServer {
           return
         }
 
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("installing fsautocomplete via dotnet tool")
         const proc = Process.spawn(["dotnet", "tool", "install", "fsautocomplete", "--tool-path", Global.Path.bin], {
           stdout: "pipe",
@@ -933,7 +958,7 @@ export namespace LSPServer {
         }
       }
 
-      if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+      if (!canInstall()) return // kilocode_change
       log.info("downloading clangd from GitHub releases")
 
       const releaseResponse = await fetch("https://api.github.com/repos/clangd/clangd/releases/latest")
@@ -1050,7 +1075,7 @@ export namespace LSPServer {
       if (!binary) {
         const js = path.join(Global.Path.bin, "node_modules", "svelte-language-server", "bin", "server.js")
         if (!(await Filesystem.exists(js))) {
-          if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+          if (!canInstall()) return // kilocode_change
           await Process.spawn([BunProc.which(), "install", "svelte-language-server"], {
             cwd: Global.Path.bin,
             env: {
@@ -1097,7 +1122,7 @@ export namespace LSPServer {
       if (!binary) {
         const js = path.join(Global.Path.bin, "node_modules", "@astrojs", "language-server", "bin", "nodeServer.js")
         if (!(await Filesystem.exists(js))) {
-          if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+          if (!canInstall()) return // kilocode_change
           await Process.spawn([BunProc.which(), "install", "@astrojs/language-server"], {
             cwd: Global.Path.bin,
             env: {
@@ -1176,7 +1201,7 @@ export namespace LSPServer {
       const launcherDir = path.join(distPath, "plugins")
       const installed = await pathExists(launcherDir)
       if (!installed) {
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("Downloading JDTLS LSP server.")
         await fs.mkdir(distPath, { recursive: true })
         const releaseURL =
@@ -1275,7 +1300,7 @@ export namespace LSPServer {
         process.platform === "win32" ? path.join(distPath, "kotlin-lsp.cmd") : path.join(distPath, "kotlin-lsp.sh")
       const installed = await Filesystem.exists(launcherScript)
       if (!installed) {
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("Downloading Kotlin Language Server from GitHub.")
 
         const releaseResponse = await fetch("https://api.github.com/repos/Kotlin/kotlin-lsp/releases/latest")
@@ -1371,7 +1396,7 @@ export namespace LSPServer {
         )
         const exists = await Filesystem.exists(js)
         if (!exists) {
-          if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+          if (!canInstall()) return // kilocode_change
           await Process.spawn([BunProc.which(), "install", "yaml-language-server"], {
             cwd: Global.Path.bin,
             env: {
@@ -1418,7 +1443,7 @@ export namespace LSPServer {
       })
 
       if (!bin) {
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("downloading lua-language-server from GitHub releases")
 
         const releaseResponse = await fetch("https://api.github.com/repos/LuaLS/lua-language-server/releases/latest")
@@ -1553,7 +1578,7 @@ export namespace LSPServer {
       if (!binary) {
         const js = path.join(Global.Path.bin, "node_modules", "intelephense", "lib", "intelephense.js")
         if (!(await Filesystem.exists(js))) {
-          if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+          if (!canInstall()) return // kilocode_change
           await Process.spawn([BunProc.which(), "install", "intelephense"], {
             cwd: Global.Path.bin,
             env: {
@@ -1650,7 +1675,7 @@ export namespace LSPServer {
       if (!binary) {
         const js = path.join(Global.Path.bin, "node_modules", "bash-language-server", "out", "cli.js")
         if (!(await Filesystem.exists(js))) {
-          if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+          if (!canInstall()) return // kilocode_change
           await Process.spawn([BunProc.which(), "install", "bash-language-server"], {
             cwd: Global.Path.bin,
             env: {
@@ -1689,7 +1714,7 @@ export namespace LSPServer {
       })
 
       if (!bin) {
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("downloading terraform-ls from HashiCorp releases")
 
         const releaseResponse = await fetch("https://api.releases.hashicorp.com/v1/releases/terraform-ls/latest")
@@ -1772,7 +1797,7 @@ export namespace LSPServer {
       })
 
       if (!bin) {
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("downloading texlab from GitHub releases")
 
         const response = await fetch("https://api.github.com/repos/latex-lsp/texlab/releases/latest")
@@ -1862,7 +1887,7 @@ export namespace LSPServer {
       if (!binary) {
         const js = path.join(Global.Path.bin, "node_modules", "dockerfile-language-server-nodejs", "lib", "server.js")
         if (!(await Filesystem.exists(js))) {
-          if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+          if (!canInstall()) return // kilocode_change
           await Process.spawn([BunProc.which(), "install", "dockerfile-language-server-nodejs"], {
             cwd: Global.Path.bin,
             env: {
@@ -1971,7 +1996,7 @@ export namespace LSPServer {
       })
 
       if (!bin) {
-        if (Flag.KILO_DISABLE_LSP_DOWNLOAD) return
+        if (!canInstall()) return // kilocode_change
         log.info("downloading tinymist from GitHub releases")
 
         const response = await fetch("https://api.github.com/repos/Myriad-Dreamin/tinymist/releases/latest")

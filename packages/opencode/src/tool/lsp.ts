@@ -53,14 +53,13 @@ export const LspTool = Tool.define("lsp", {
       throw new Error(`File not found: ${file}`)
     }
 
-    const available = await LSP.hasClients(file)
-    if (!available) {
-      throw new Error("No LSP server available for this file type.")
-    }
+    // kilocode_change start - the complete tool-driven LSP call chain may
+    // start an existing server but cannot install, download, build, or bootstrap.
+    const result: unknown[] = await LSP.installedOnly(async () => {
+      const available = await LSP.installed(file)
+      if (!available) throw new Error("No installed LSP server is available for this file type.")
 
-    await LSP.touchFile(file, true)
-
-    const result: unknown[] = await (async () => {
+      await LSP.touchFile(file, true)
       switch (args.operation) {
         case "goToDefinition":
           return LSP.definition(position)
@@ -81,7 +80,8 @@ export const LspTool = Tool.define("lsp", {
         case "outgoingCalls":
           return LSP.outgoingCalls(position)
       }
-    })()
+    })
+    // kilocode_change end
 
     const output = (() => {
       if (result.length === 0) return `No results found for ${args.operation}`

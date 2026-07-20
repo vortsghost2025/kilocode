@@ -12,12 +12,23 @@ export namespace Tool {
 
   export interface InitContext {
     agent?: Agent.Info
+    role?: Permission.Ruleset // kilocode_change - canonical role policy
+    permission?: Permission.Ruleset // kilocode_change - inherited narrowing for context-visible tool metadata
+    sessionID?: SessionID // kilocode_change - trusted persisted authority lookup
   }
 
   export type Context<M extends Metadata = Metadata> = {
     sessionID: SessionID
     messageID: MessageID
     agent: string
+    // kilocode_change start
+    rules?: {
+      role: Permission.Ruleset
+      agent: Permission.Ruleset
+      session: Permission.Ruleset
+      sessionID: SessionID
+    }
+    // kilocode_change end
     abort: AbortSignal
     callID?: string
     extra?: { [key: string]: any }

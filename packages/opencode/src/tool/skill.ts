@@ -7,7 +7,7 @@ import { Ripgrep } from "../file/ripgrep"
 import { iife } from "@/util/iife"
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
-  const list = await Skill.available(ctx?.agent)
+  const list = await Skill.available(ctx?.agent, ctx?.permission, ctx?.role, ctx?.sessionID) // kilocode_change
 
   const description =
     list.length === 0

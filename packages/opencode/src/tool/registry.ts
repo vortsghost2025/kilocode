@@ -36,6 +36,7 @@ import { pathToFileURL } from "url"
 import { Effect, Layer, ServiceMap } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { makeRuntime } from "@/effect/run-service"
+import type { Permission } from "@/permission" // kilocode_change
 
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
@@ -50,6 +51,9 @@ export namespace ToolRegistry {
     readonly tools: (
       model: { providerID: ProviderID; modelID: ModelID },
       agent?: Agent.Info,
+      permission?: Permission.Ruleset, // kilocode_change
+      role?: Permission.Ruleset, // kilocode_change
+      sessionID?: import("@/session/schema").SessionID, // kilocode_change
     ) => Effect.Effect<(Awaited<ReturnType<Tool.Info["init"]>> & { id: string })[]>
   }
 
@@ -72,6 +76,16 @@ export namespace ToolRegistry {
                 parameters: z.object(def.args),
                 description: def.description,
                 execute: async (args, toolCtx) => {
+                  // kilocode_change start - custom and plugin-provided tools do
+                  // not have built-in permission checks, so enforce their exact
+                  // tool ID at the common production boundary.
+                  await toolCtx.ask({
+                    permission: id,
+                    patterns: ["*"],
+                    always: ["*"],
+                    metadata: {},
+                  })
+                  // kilocode_change end
                   const pluginCtx = {
                     ...toolCtx,
                     directory: ctx.directory,
@@ -168,6 +182,9 @@ export namespace ToolRegistry {
       const tools = Effect.fn("ToolRegistry.tools")(function* (
         model: { providerID: ProviderID; modelID: ModelID },
         agent?: Agent.Info,
+        permission?: Permission.Ruleset, // kilocode_change
+        role?: Permission.Ruleset, // kilocode_change
+        sessionID?: import("@/session/schema").SessionID, // kilocode_change
       ) {
         const state = yield* InstanceState.get(cache)
         const allTools = yield* all(state.custom)
@@ -187,7 +204,7 @@ export namespace ToolRegistry {
           filtered,
           Effect.fnUntraced(function* (tool) {
             using _ = log.time(tool.id)
-            const next = yield* Effect.promise(() => tool.init({ agent }))
+            const next = yield* Effect.promise(() => tool.init({ agent, permission, role, sessionID })) // kilocode_change
             const output = {
               description: next.description,
               parameters: next.parameters,
@@ -228,7 +245,10 @@ export namespace ToolRegistry {
       modelID: ModelID
     },
     agent?: Agent.Info,
+    permission?: Permission.Ruleset, // kilocode_change
+    role?: Permission.Ruleset, // kilocode_change
+    sessionID?: import("@/session/schema").SessionID, // kilocode_change
   ): Promise<(Awaited<ReturnType<Tool.Info["init"]>> & { id: string })[]> {
-    return runPromise((svc) => svc.tools(model, agent))
+    return runPromise((svc) => svc.tools(model, agent, permission, role, sessionID)) // kilocode_change
   }
 }

@@ -18,6 +18,7 @@ import { PermissionID } from "./schema"
 import { ConfigProtection } from "@/kilocode/permission/config-paths" // kilocode_change
 import { Identifier } from "@/id/id" // kilocode_change
 import { drainCovered } from "@/kilocode/permission/drain" // kilocode_change
+import { CapabilityAuthority } from "@/kilocode/capability/authority" // kilocode_change
 
 export namespace Permission {
   const log = Log.create({ service: "permission" })
@@ -33,6 +34,7 @@ export namespace Permission {
       pattern: z.string(),
       action: Action,
     })
+    .strict()
     .meta({
       ref: "PermissionRule",
     })
@@ -109,7 +111,10 @@ export namespace Permission {
 
   export const AskInput = Request.partial({ id: true }).extend({
     ruleset: Ruleset,
+    narrow: Ruleset.optional(), // kilocode_change - session rules may narrow but never widen static authority
   })
+
+  type AskRequest = z.infer<typeof AskInput> & { role: Ruleset } // kilocode_change - internal canonical policy
 
   export const ReplyInput = z.object({
     requestID: PermissionID.zod,
@@ -132,7 +137,7 @@ export namespace Permission {
   // kilocode_change end
 
   export interface Interface {
-    readonly ask: (input: z.infer<typeof AskInput>) => Effect.Effect<void, Error>
+    readonly ask: (input: AskRequest) => Effect.Effect<void, Error> // kilocode_change
     readonly reply: (input: z.infer<typeof ReplyInput>) => Effect.Effect<void>
     readonly list: () => Effect.Effect<Request[]>
     readonly saveAlwaysRules: (input: z.infer<typeof SaveAlwaysRulesInput>) => Effect.Effect<void> // kilocode_change
@@ -143,6 +148,8 @@ export namespace Permission {
   interface PendingEntry {
     info: Request
     ruleset: Ruleset // kilocode_change
+    role: Ruleset // kilocode_change
+    narrow: Ruleset // kilocode_change
     deferred: Deferred.Deferred<void, RejectedError | CorrectedError>
   }
 
@@ -186,9 +193,11 @@ export namespace Permission {
         }),
       )
 
-      const ask = Effect.fn("Permission.ask")(function* (input: z.infer<typeof AskInput>) {
+      // kilocode_change start - canonical role is supplied only by trusted tool context
+      const ask = Effect.fn("Permission.ask")(function* (input: AskRequest) {
         const { approved, pending } = yield* InstanceState.get(state)
-        const { ruleset, ...request } = input
+        const { ruleset, role, narrow = [], ...request } = input
+        // kilocode_change end
         const s = yield* InstanceState.get(state) // kilocode_change
         const local = s.session[request.sessionID] ?? [] // kilocode_change
         let needsAsk = false
@@ -198,7 +207,18 @@ export namespace Permission {
         // kilocode_change end
 
         for (const pattern of request.patterns) {
-          const rule = evaluate(request.permission, pattern, ruleset, approved)
+          // kilocode_change start - static and inherited ceilings are evaluated
+          // independently so approvals and session rules cannot reopen a deny.
+          const rule = CapabilityAuthority.evaluate({
+            permission: request.permission,
+            pattern,
+            role,
+            agent: ruleset,
+            session: narrow,
+            sessionID: request.sessionID,
+            approved: Permission.merge(approved, local),
+          })
+          // kilocode_change end
           log.info("evaluated", { permission: request.permission, pattern, action: rule })
           if (rule.action === "deny") {
             return yield* new DeniedError({
@@ -227,7 +247,7 @@ export namespace Permission {
         log.info("asking", { id, permission: info.permission, patterns: info.patterns })
 
         const deferred = yield* Deferred.make<void, RejectedError | CorrectedError>()
-        s.pending.set(id, { info, ruleset, deferred }) // kilocode_change — store ruleset
+        s.pending.set(id, { info, ruleset, role, narrow, deferred }) // kilocode_change — store authority layers
         void Bus.publish(Event.Asked, info)
         return yield* Effect.ensuring(
           Deferred.await(deferred),
@@ -285,9 +305,20 @@ export namespace Permission {
 
         for (const [id, item] of pending.entries()) {
           if (item.info.sessionID !== existing.info.sessionID) continue
+          // kilocode_change start - approvals satisfy asks but never static or inherited denies
           const ok = item.info.patterns.every(
-            (pattern) => evaluate(item.info.permission, pattern, item.ruleset, approved).action === "allow", // kilocode_change — include original ruleset
+            (pattern) =>
+              CapabilityAuthority.evaluate({
+                permission: item.info.permission,
+                pattern,
+                role: item.role,
+                agent: item.ruleset,
+                session: item.narrow,
+                sessionID: item.info.sessionID,
+                approved,
+              }).action === "allow",
           )
+          // kilocode_change end
           if (!ok) continue
           pending.delete(id)
           void Bus.publish(Event.Replied, {
@@ -460,9 +491,12 @@ export namespace Permission {
 
   export const { runPromise } = makeRuntime(Service, layer)
 
-  export async function ask(input: z.infer<typeof AskInput>) {
-    return runPromise((s) => s.ask(input))
+  // kilocode_change start
+  export async function ask(input: z.infer<typeof AskInput>, role?: Ruleset) {
+    const parsed = AskInput.parse(input)
+    return runPromise((s) => s.ask({ ...parsed, role: role ?? parsed.ruleset }))
   }
+  // kilocode_change end
 
   export async function reply(input: z.infer<typeof ReplyInput>) {
     return runPromise((s) => s.reply(input))

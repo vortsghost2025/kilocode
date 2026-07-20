@@ -225,6 +225,7 @@ export namespace SessionProcessor {
               }
 
               const agent = yield* agents.get(ctx.assistantMessage.agent)
+              const role = yield* agents.policy(ctx.assistantMessage.agent)
               yield* permission.ask({
                 permission: "doom_loop",
                 patterns: [value.toolName],
@@ -232,6 +233,7 @@ export namespace SessionProcessor {
                 metadata: { tool: value.toolName, input: value.input },
                 always: [value.toolName],
                 ruleset: agent.permission,
+                role,
               })
               return
             }
