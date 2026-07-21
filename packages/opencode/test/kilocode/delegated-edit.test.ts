@@ -3,7 +3,9 @@ import fs from "fs/promises"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundTaskTool } from "../../src/kilocode/background-task-tool"
+import { DelegateEditTool } from "../../src/kilocode/delegate-edit-tool"
 import { DelegatedEdit } from "../../src/kilocode/delegated-edit"
+import { PopulateTool } from "../../src/kilocode/populate-tool"
 import { AuthorityStore } from "../../src/kilocode/capability/authority-store"
 import { ToolAsk } from "../../src/kilocode/permission/tool-ask"
 import { Permission } from "../../src/permission"
@@ -117,8 +119,8 @@ describe("delegated edit authorization", () => {
         expect(Permission.evaluate("bash", "bun test test/tool/task.test.ts", check!.permission).action).toBe("allow")
 
         expect(Permission.evaluate("edit", ".kilo/agent/reviewer.md", reviewer!.permission).action).toBe("deny")
-        expect(Permission.evaluate("bash", "git add .", git!.permission).action).toBe("ask")
-        expect(Permission.evaluate("bash", 'git commit -m "test"', git!.permission).action).toBe("ask")
+        expect(Permission.evaluate("bash", "git add .", git!.permission).action).toBe("allow")
+        expect(Permission.evaluate("bash", 'git commit -m "test"', git!.permission).action).toBe("allow")
       },
     })
   })
@@ -218,13 +220,13 @@ describe("delegated edit authorization", () => {
           path: path.join("src", "inside.ts"),
         })
         expect(() => DelegatedEdit.scope({ operation: "edit", path: tmp.extra })).toThrow(
-          "Delegated edit target must not be a symbolic link",
+          "reason: target must not be a symbolic link",
         )
         expect(() => DelegatedEdit.scope({ operation: "edit", path: "escape/outside.ts" })).toThrow(
-          "Delegated edit target must remain physically inside the current project",
+          "reason: target must remain physically inside the current project",
         )
         expect(() => DelegatedEdit.scope({ operation: "edit", path: "src/missing.ts" })).toThrow(
-          "Delegated edit target must already exist",
+          "reason: target must already exist",
         )
       },
     })
@@ -277,7 +279,7 @@ describe("delegated edit authorization", () => {
                 extra: {},
               },
             ),
-          ).rejects.toThrow("Phase2F requires a structured exact-path edit authorization")
+          ).rejects.toThrow("DELEGATED_EDIT_AUTHORIZATION_INVALID")
           expect(state.prompts).toBe(0)
           expect(await Session.children(current.session.id)).toHaveLength(0)
         },
@@ -298,14 +300,14 @@ describe("delegated edit authorization", () => {
       fn: async () => {
         const current = await setup()
         const asks: string[] = []
-        const tool = await TaskTool.init()
+        const tool = await DelegateEditTool.init()
         await expect(
           tool.execute(
             {
               description: "missing target",
               prompt: "Edit a file that does not exist",
-              subagent_type: "phase2f-implementer",
-              authorization: { operation: "edit", path: "missing.ts" },
+              operation: "edit",
+              path: "missing.ts",
             },
             {
               sessionID: current.session.id,
@@ -321,8 +323,8 @@ describe("delegated edit authorization", () => {
               extra: {},
             },
           ),
-        ).rejects.toThrow("Delegated edit target must already exist")
-        expect(asks).toEqual(["task"])
+        ).rejects.toThrow("reason: target must already exist")
+        expect(asks).toEqual([])
         expect(await Session.children(current.session.id)).toHaveLength(0)
       },
     })
@@ -550,16 +552,13 @@ describe("delegated edit authorization", () => {
             agent: parent!.permission,
             session: current.session.permission ?? [],
           }).ask
-          const tool = await TaskTool.init()
+          const tool = await DelegateEditTool.init()
           await tool.execute(
             {
               description: "edit reviewer model",
               prompt: "Change exactly one line in .kilo/agent/reviewer.md",
-              subagent_type: "phase2f-implementer",
-              authorization: {
-                operation: "edit",
-                path: ".kilo/agent/reviewer.md",
-              },
+              operation: "edit",
+              path: ".kilo/agent/reviewer.md",
             },
             {
               sessionID: current.session.id,
@@ -604,8 +603,8 @@ describe("delegated edit authorization", () => {
               {
                 description: "replay reviewer edit",
                 prompt: "Attempt to replay the same authorization",
-                subagent_type: "phase2f-implementer",
-                authorization: { operation: "edit", path: ".kilo/agent/reviewer.md" },
+                operation: "edit",
+                path: ".kilo/agent/reviewer.md",
               },
               {
                 sessionID: current.session.id,
@@ -769,13 +768,13 @@ describe("delegated edit authorization", () => {
             agent: parent!.permission,
             session: current.session.permission ?? [],
           }).ask
-          const tool = await TaskTool.init()
+          const tool = await DelegateEditTool.init()
           await tool.execute(
             {
               description: "live delegated edit",
               prompt: "Read and edit reviewer.md once, then test sibling and replay denials.",
-              subagent_type: "phase2f-implementer",
-              authorization: { operation: "edit", path: ".kilo/agent/reviewer.md" },
+              operation: "edit",
+              path: ".kilo/agent/reviewer.md",
             },
             {
               sessionID: current.session.id,
@@ -829,7 +828,271 @@ describe("delegated edit authorization", () => {
     }
   })
 
-  test("selected child must already have edit capability", async () => {
+  test("fresh sequential leases support same-path repair and a different next path", async () => {
+    const original = SessionPrompt.prompt
+    const scopes: DelegatedEdit.Scope[] = []
+    await using tmp = await tmpdir({
+      git: true,
+      init: (dir) => copy(dir, ["orchestrator", "phase2f-implementer", "reviewer"]),
+    })
+
+    try {
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Agent.get("orchestrator")
+          const phase = await Agent.get("phase2f-implementer")
+          expect(parent).toBeDefined()
+          expect(phase).toBeDefined()
+          const current = await setup()
+          const reviewer = path.join(".kilo", "agent", "reviewer.md")
+          const orchestrator = path.join(".kilo", "agent", "orchestrator.md")
+          const steps = new Map([
+            [
+              "lease-first",
+              {
+                path: reviewer,
+                old: "description: focused read-only diff sanity reviewer",
+                next: "description: sequential delegated edit reviewer",
+              },
+            ],
+            [
+              "lease-repair",
+              {
+                path: reviewer,
+                old: "description: sequential delegated edit reviewer",
+                next: "description: focused read-only diff sanity reviewer",
+              },
+            ],
+            [
+              "lease-next-path",
+              {
+                path: orchestrator,
+                old: "description: Coordinate complex tasks with planning-first delegation.",
+                next: "description: Coordinate deterministic delegated edits.",
+              },
+            ],
+          ])
+
+          ;(SessionPrompt as unknown as { prompt: typeof SessionPrompt.prompt }).prompt = (async (input: {
+            sessionID: SessionID
+          }) => {
+            const child = await Session.get(input.sessionID)
+            const lease = DelegatedEdit.inspect(child.id)
+            expect(lease).toBeDefined()
+            const step = steps.get(lease!.call)
+            expect(step).toBeDefined()
+            scopes.push(lease!.scope)
+            const ask = ToolAsk.build({
+              sessionID: child.id,
+              messageID: MessageID.ascending(),
+              callID: `edit-${lease!.call}`,
+              operation: "edit",
+              agent: phase!.permission,
+              session: child.permission ?? [],
+            }).ask
+            const context: Tool.Context = {
+              sessionID: child.id,
+              messageID: MessageID.ascending(),
+              callID: `edit-${lease!.call}`,
+              agent: phase!.name,
+              abort: AbortSignal.any([]),
+              messages: [],
+              metadata: () => {},
+              ask,
+              extra: {},
+            }
+            const file = path.join(tmp.path, step!.path)
+            const read = await ReadTool.init({ agent: phase! })
+            await read.execute({ filePath: file }, context)
+            const evidence = {
+              source: "delegated-edit-lease" as const,
+              exactText: DelegatedEdit.canonicalLeaseText(lease!),
+              purpose: `apply ${lease!.call}`,
+            }
+            const edit = await EditTool.init({ agent: phase! })
+            await edit.execute(
+              { filePath: file, oldString: step!.old, newString: step!.next, evidenceRecall: evidence },
+              context,
+            )
+            await expect(
+              ask({
+                permission: "edit",
+                patterns: [lease!.scope.path],
+                always: ["*"],
+                metadata: { evidenceRecall: evidence },
+              }),
+            ).rejects.toThrow("EDIT_LEASE_EXHAUSTED")
+            return { parts: [{ type: "text", text: "lease complete" }] }
+          }) as unknown as typeof SessionPrompt.prompt
+
+          const tool = await DelegateEditTool.init()
+          const run = async (call: string, target: string) => {
+            const ask = ToolAsk.build({
+              sessionID: current.session.id,
+              messageID: current.assistant,
+              callID: call,
+              operation: "delegate_edit",
+              agent: parent!.permission,
+              session: current.session.permission ?? [],
+            }).ask
+            return tool.execute(
+              {
+                description: "sequential lease",
+                prompt: "Apply exactly one authorized mutation",
+                operation: "edit",
+                path: target,
+              },
+              {
+                sessionID: current.session.id,
+                messageID: current.assistant,
+                callID: call,
+                agent: parent!.name,
+                abort: AbortSignal.any([]),
+                messages: [],
+                metadata: () => {},
+                ask,
+                extra: {},
+              },
+            )
+          }
+
+          await run("lease-first", reviewer)
+          await run("lease-repair", reviewer)
+          await run("lease-next-path", orchestrator)
+
+          expect(scopes).toEqual([
+            { operation: "edit", path: reviewer },
+            { operation: "edit", path: reviewer },
+            { operation: "edit", path: orchestrator },
+          ])
+          expect(await Session.children(current.session.id)).toHaveLength(3)
+          expect(await Bun.file(path.join(tmp.path, reviewer)).text()).toContain(
+            "description: focused read-only diff sanity reviewer",
+          )
+          expect(await Bun.file(path.join(tmp.path, orchestrator)).text()).toContain(
+            "description: Coordinate deterministic delegated edits.",
+          )
+        },
+      })
+    } finally {
+      ;(SessionPrompt as unknown as { prompt: typeof SessionPrompt.prompt }).prompt = original
+    }
+  })
+
+  test("populate lease fills an existing empty file through an explicit operation", async () => {
+    const original = SessionPrompt.prompt
+    const state = { prompts: 0, tools: undefined as Record<string, boolean> | undefined }
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await copy(dir, ["orchestrator", "phase2f-implementer"])
+        await Bun.write(path.join(dir, "empty.ts"), "")
+      },
+    })
+
+    try {
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const parent = await Agent.get("orchestrator")
+          const phase = await Agent.get("phase2f-implementer")
+          expect(parent).toBeDefined()
+          expect(phase).toBeDefined()
+          const current = await setup()
+          ;(SessionPrompt as unknown as { prompt: typeof SessionPrompt.prompt }).prompt = (async (input: {
+            sessionID: SessionID
+            tools?: Record<string, boolean>
+          }) => {
+            state.prompts++
+            state.tools = input.tools
+            const child = await Session.get(input.sessionID)
+            const lease = DelegatedEdit.inspect(child.id)
+            expect(lease?.scope).toEqual({ operation: "populate", path: "empty.ts" })
+            const ask = ToolAsk.build({
+              sessionID: child.id,
+              messageID: MessageID.ascending(),
+              callID: "populate-empty",
+              operation: "populate",
+              agent: phase!.permission,
+              session: child.permission ?? [],
+            }).ask
+            const populate = await PopulateTool.init({ agent: phase! })
+            await populate.execute(
+              {
+                filePath: path.join(tmp.path, "empty.ts"),
+                content: "export const ready = true\n",
+                evidenceRecall: {
+                  source: "delegated-edit-lease",
+                  exactText: DelegatedEdit.canonicalLeaseText(lease!),
+                  purpose: "populate the authorized empty file",
+                },
+              },
+              {
+                sessionID: child.id,
+                messageID: MessageID.ascending(),
+                callID: "populate-empty",
+                agent: phase!.name,
+                abort: AbortSignal.any([]),
+                messages: [],
+                metadata: () => {},
+                ask,
+                extra: {},
+              },
+            )
+            return { parts: [{ type: "text", text: "populated" }] }
+          }) as unknown as typeof SessionPrompt.prompt
+
+          const tool = await DelegateEditTool.init()
+          const context = (call: string): Tool.Context => ({
+            sessionID: current.session.id,
+            messageID: current.assistant,
+            callID: call,
+            agent: parent!.name,
+            abort: AbortSignal.any([]),
+            messages: [],
+            metadata: () => {},
+            ask: ToolAsk.build({
+              sessionID: current.session.id,
+              messageID: current.assistant,
+              callID: call,
+              operation: "delegate_edit",
+              agent: parent!.permission,
+              session: current.session.permission ?? [],
+            }).ask,
+            extra: {},
+          })
+          await expect(
+            tool.execute(
+              { description: "wrong empty operation", prompt: "Edit empty.ts", operation: "edit", path: "empty.ts" },
+              context("empty-edit"),
+            ),
+          ).rejects.toThrow("expected_operation: populate")
+          expect(state.prompts).toBe(0)
+          expect(await Session.children(current.session.id)).toHaveLength(0)
+
+          await tool.execute(
+            {
+              description: "populate empty file",
+              prompt: "Populate empty.ts",
+              operation: "populate",
+              path: "empty.ts",
+            },
+            context("empty-populate"),
+          )
+          expect(state.prompts).toBe(1)
+          expect(state.tools?.edit).toBe(false)
+          expect(state.tools?.write).toBe(false)
+          expect(state.tools?.populate).toBeUndefined()
+          expect(await Bun.file(path.join(tmp.path, "empty.ts")).text()).toBe("export const ready = true\n")
+        },
+      })
+    } finally {
+      ;(SessionPrompt as unknown as { prompt: typeof SessionPrompt.prompt }).prompt = original
+    }
+  })
+
+  test("read-only agents cannot receive delegated-edit authorization", async () => {
     const original = SessionPrompt.prompt
     let prompts = 0
     await using tmp = await tmpdir({
@@ -841,7 +1104,7 @@ describe("delegated edit authorization", () => {
       await Instance.provide({
         directory: tmp.path,
         fn: async () => {
-          const parent = await Agent.get("orchestrator")
+          const parent = await Agent.get("reviewer")
           const current = await setup()
           ;(SessionPrompt as unknown as { prompt: typeof SessionPrompt.prompt }).prompt = (async () => {
             prompts++
@@ -855,20 +1118,20 @@ describe("delegated edit authorization", () => {
             agent: parent!.permission,
             session: current.session.permission ?? [],
           }).ask
-          const tool = await TaskTool.init()
+          const tool = await DelegateEditTool.init()
           await expect(
             tool.execute(
               {
                 description: "invalid reviewer edit",
                 prompt: "Edit reviewer config",
-                subagent_type: "reviewer",
-                authorization: { operation: "edit", path: ".kilo/agent/reviewer.md" },
+                operation: "edit",
+                path: ".kilo/agent/reviewer.md",
               },
               {
                 sessionID: current.session.id,
                 messageID: current.assistant,
                 callID: "reviewer-edit",
-                agent: "orchestrator",
+                agent: "reviewer",
                 abort: AbortSignal.any([]),
                 messages: [],
                 metadata: () => {},
@@ -876,8 +1139,9 @@ describe("delegated edit authorization", () => {
                 extra: {},
               },
             ),
-          ).rejects.toThrow("Delegated edit authorization is restricted to Phase2F implementation tasks")
+          ).rejects.toThrow("reason: only Orchestrator may authorize Phase2F implementation tasks")
           expect(prompts).toBe(0)
+          expect(await Session.children(current.session.id)).toHaveLength(0)
         },
       })
     } finally {
@@ -885,7 +1149,7 @@ describe("delegated edit authorization", () => {
     }
   })
 
-  test("delegated edit authorization cannot resume an existing child task", async () => {
+  test("delegate_edit has no child-resume argument", async () => {
     const original = SessionPrompt.prompt
     const state = { prompts: 0 }
     await using tmp = await tmpdir({
@@ -912,16 +1176,16 @@ describe("delegated edit authorization", () => {
             agent: parent!.permission,
             session: current.session.permission ?? [],
           }).ask
-          const tool = await TaskTool.init()
+          const tool = await DelegateEditTool.init()
           await expect(
             tool.execute(
               {
                 description: "resume delegated edit",
                 prompt: "Edit reviewer config",
-                subagent_type: "phase2f-implementer",
                 task_id: "ses_existing",
-                authorization: { operation: "edit", path: ".kilo/agent/reviewer.md" },
-              },
+                operation: "edit",
+                path: ".kilo/agent/reviewer.md",
+              } as never,
               {
                 sessionID: current.session.id,
                 messageID: current.assistant,
@@ -934,8 +1198,9 @@ describe("delegated edit authorization", () => {
                 extra: {},
               },
             ),
-          ).rejects.toThrow("Delegated edit authorization cannot resume an existing task")
+          ).rejects.toThrow("DELEGATED_EDIT_AUTHORIZATION_INVALID")
           expect(state.prompts).toBe(0)
+          expect(await Session.children(current.session.id)).toHaveLength(0)
         },
       })
     } finally {

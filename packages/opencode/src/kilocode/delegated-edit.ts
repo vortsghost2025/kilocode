@@ -7,10 +7,15 @@ import type { SessionID } from "@/session/schema"
 import { Filesystem } from "@/util/filesystem"
 
 export namespace DelegatedEdit {
+  export const Operation = z.enum(["edit", "populate"])
+  export type Operation = z.infer<typeof Operation>
+
   export const Authorization = z
     .object({
-      operation: z.literal("edit"),
-      path: z.string().min(1),
+      operation: Operation.describe(
+        'The exact mutation operation: "edit" for a non-empty file or "populate" for an existing empty file',
+      ),
+      path: z.string().min(1).describe("The exact repository-relative file path"),
     })
     .strict()
 
@@ -67,37 +72,80 @@ export namespace DelegatedEdit {
     throw new Permission.DeniedError({ ruleset })
   }
 
+  export class AuthorizationError extends Error {
+    readonly code = "DELEGATED_EDIT_AUTHORIZATION_INVALID"
+    readonly operation: string
+    readonly path: string
+
+    constructor(input: { operation: string; path: string; reason: string }) {
+      const schema = JSON.stringify({ operation: input.operation, path: input.path })
+      super(
+        [
+          "DELEGATED_EDIT_AUTHORIZATION_INVALID",
+          `expected_operation: ${input.operation}`,
+          `expected_path: ${input.path}`,
+          `expected_schema: ${schema}`,
+          `reason: ${input.reason}`,
+          "worker_launched: false",
+        ].join("\n"),
+      )
+      this.name = "AuthorizationError"
+      this.operation = input.operation
+      this.path = input.path
+    }
+  }
+
+  export function invalid(reason: string) {
+    return new AuthorizationError({
+      operation: "edit | populate",
+      path: "<canonical repository-relative path>",
+      reason,
+    })
+  }
+
   export function scope(input: Authorization): Scope {
-    const target = path.resolve(
-      Filesystem.windowsPath(path.isAbsolute(input.path) ? input.path : path.join(Instance.directory, input.path)),
-    )
+    const root = Filesystem.resolve(Instance.worktree)
+    const target = path.resolve(root, Filesystem.windowsPath(input.path))
+    const lexical = path.relative(root, target)
+    const expected =
+      lexical && !path.isAbsolute(lexical) && lexical !== ".." && !lexical.startsWith(`..${path.sep}`)
+        ? lexical
+        : input.path
+    const fail = (reason: string, operation = input.operation): never => {
+      throw new AuthorizationError({ operation, path: expected, reason })
+    }
+    if (path.isAbsolute(input.path)) fail("path must be repository-relative")
+    if (!lexical || path.isAbsolute(lexical) || lexical === ".." || lexical.startsWith(`..${path.sep}`)) {
+      fail("path must resolve to one file inside the current worktree")
+    }
     const stat = (() => {
       try {
         return lstatSync(target)
       } catch (err) {
         if (typeof err === "object" && err !== null && "code" in err && err.code === "ENOENT") {
-          throw new Error("Delegated edit target must already exist")
+          return fail("target must already exist")
         }
         throw err
       }
     })()
-    if (stat.isSymbolicLink()) throw new Error("Delegated edit target must not be a symbolic link")
-    if (!stat.isFile()) throw new Error("Delegated edit target must be a regular file")
+    if (stat.isSymbolicLink()) fail("target must not be a symbolic link")
+    if (!stat.isFile()) fail("target must be a regular file")
 
     const physical = Filesystem.resolve(target)
     const dir = Filesystem.resolve(Instance.directory)
-    const root = Filesystem.resolve(Instance.worktree)
     const roots = root === path.parse(root).root ? [dir] : [dir, root]
     const inside = roots.some((base) => {
       const relative = path.relative(base, physical)
       return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`)
     })
-    if (!inside) throw new Error("Delegated edit target must remain physically inside the current project")
+    if (!inside) fail("target must remain physically inside the current project")
 
     const relative = path.relative(root, physical)
     if (!relative || path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
-      throw new Error("Delegated edit target must resolve to one file inside the current worktree")
+      fail("target must resolve to one file inside the current worktree")
     }
+    if (input.operation === "populate" && stat.size !== 0) fail("populate requires an existing empty file")
+    if (input.operation === "edit" && stat.size === 0) fail("empty files require the populate operation", "populate")
     return Object.freeze({ operation: input.operation, path: relative })
   }
 

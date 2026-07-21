@@ -1,6 +1,7 @@
 // kilocode_change - new file
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import z from "zod"
+import { DelegateEditTool } from "../../src/kilocode/delegate-edit-tool"
 import { Instance } from "../../src/project/instance"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session"
@@ -110,8 +111,19 @@ describe("TaskTool public schema", () => {
         expect(schema.required ?? []).not.toContain("authorization")
         expect(minimal).toBeDefined()
         expect(minimal).not.toHaveProperty("properties.authorization")
+        expect(JSON.stringify(schema)).not.toContain("phase2f-implementer")
       },
     })
+  })
+
+  test("delegate_edit exposes one flat required contract", async () => {
+    const tool = await DelegateEditTool.init()
+    const schema = z.toJSONSchema(tool.parameters)
+    expect(schema.required).toEqual(["description", "prompt", "operation", "path"])
+    expect(schema.properties?.operation).toMatchObject({ enum: ["edit", "populate"] })
+    expect(schema.properties?.path).toMatchObject({ type: "string", minLength: 1 })
+    expect(schema.properties).not.toHaveProperty("authorization")
+    expect(schema.properties).not.toHaveProperty("task_id")
   })
 })
 
@@ -144,7 +156,7 @@ describe("TaskTool authorization runtime", () => {
     })
   })
 
-  test("rejects authorization supplied to a non-Phase2F task", async () => {
+  test("generic task rejects the retired authorization argument", async () => {
     await using tmp = await tmpdir({ git: true, config: config() })
     await Instance.provide({
       directory: tmp.path,
@@ -158,10 +170,10 @@ describe("TaskTool authorization runtime", () => {
               prompt: "Run focused validation",
               subagent_type: "command-check",
               authorization: { operation: "edit", path: "target.ts" },
-            },
+            } as never,
             ctx(root.session.id, root.assistant),
           ),
-        ).rejects.toThrow("Delegated edit authorization is restricted to Phase2F implementation tasks")
+        ).rejects.toThrow('Unrecognized key: \\"authorization\\"')
       },
     })
   })
@@ -182,32 +194,63 @@ describe("TaskTool authorization runtime", () => {
             },
             ctx(root.session.id, root.assistant),
           ),
-        ).rejects.toThrow("Phase2F requires a structured exact-path edit authorization")
+        ).rejects.toThrow("DELEGATED_EDIT_AUTHORIZATION_INVALID")
       },
     })
   })
 
-  test("requires Orchestrator and an existing exact path for Phase2F", async () => {
+  test("delegate_edit requires Orchestrator and an existing exact path", async () => {
     await using tmp = await tmpdir({ git: true, config: config() })
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         const other = await seed("code")
-        const tool = await TaskTool.init()
+        const tool = await DelegateEditTool.init()
         const input = {
           description: "edit target",
           prompt: "Edit the target",
-          subagent_type: "phase2f-implementer",
-          authorization: { operation: "edit" as const, path: "target.ts" },
+          operation: "edit" as const,
+          path: "target.ts",
         }
         await expect(tool.execute(input, ctx(other.session.id, other.assistant, "code"))).rejects.toThrow(
-          "Only Orchestrator may authorize Phase2F implementation tasks",
+          "only Orchestrator may authorize Phase2F implementation tasks",
         )
 
         const root = await seed()
         await expect(
           tool.execute(input, ctx(root.session.id, root.assistant, "orchestrator", "missing")),
-        ).rejects.toThrow("Delegated edit target must already exist")
+        ).rejects.toThrow("reason: target must already exist")
+      },
+    })
+  })
+
+  test("missing or malformed delegation launches no worker request", async () => {
+    await using tmp = await tmpdir({ git: true, config: config() })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const root = await seed()
+        const prompt = spyOn(SessionPrompt, "prompt").mockResolvedValue({
+          info: { role: "assistant" },
+          parts: [{ type: "text", text: "unexpected" }],
+        } as never)
+        try {
+          const tool = await DelegateEditTool.init()
+          const context = ctx(root.session.id, root.assistant)
+          await expect(
+            tool.execute({ description: "missing path", prompt: "Edit target", operation: "edit" } as never, context),
+          ).rejects.toThrow("DELEGATED_EDIT_AUTHORIZATION_INVALID")
+          await expect(
+            tool.execute(
+              { description: "bad operation", prompt: "Edit target", operation: "write", path: "target.ts" } as never,
+              context,
+            ),
+          ).rejects.toThrow("DELEGATED_EDIT_AUTHORIZATION_INVALID")
+          expect(prompt).toHaveBeenCalledTimes(0)
+          expect(await Session.children(root.session.id)).toHaveLength(0)
+        } finally {
+          prompt.mockRestore()
+        }
       },
     })
   })

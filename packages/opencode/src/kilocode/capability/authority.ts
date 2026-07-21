@@ -4,7 +4,7 @@ import { Wildcard } from "@/util/wildcard"
 import { AuthorityStore } from "./authority-store"
 
 export namespace CapabilityAuthority {
-  const EDIT = new Set(["edit", "write", "apply_patch", "multiedit"])
+  const EDIT = new Set(["edit", "populate", "write", "apply_patch", "multiedit"])
   const rank = { allow: 0, ask: 1, deny: 2 } as const
 
   function match(permission: string, pattern: string, ruleset: Permission.Ruleset) {

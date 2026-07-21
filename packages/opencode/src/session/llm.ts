@@ -355,7 +355,10 @@ export namespace LLM {
       session: input.permission,
       sessionID,
       user: input.user.tools,
-      delegatedEdit: DelegatedEdit.inspect(sessionID)?.consumed === false,
+      delegatedEdit: (() => {
+        const lease = DelegatedEdit.inspect(sessionID)
+        return lease?.consumed === false ? lease.scope : undefined
+      })(),
     })
   }
   // kilocode_change end

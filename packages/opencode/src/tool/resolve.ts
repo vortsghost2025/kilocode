@@ -9,7 +9,7 @@ export function filterResolvedTools<T>(input: {
   session?: Permission.Ruleset
   sessionID?: import("@/session/schema").SessionID
   user?: Record<string, boolean>
-  delegatedEdit?: boolean
+  delegatedEdit?: import("@/kilocode/delegated-edit").DelegatedEdit.Scope
 }) {
   const disabled = CapabilityAuthority.disabled({
     tools: Object.keys(input.tools),
@@ -20,7 +20,7 @@ export function filterResolvedTools<T>(input: {
   })
   const tools = { ...input.tools }
   for (const id of Object.keys(tools)) {
-    const leased = id === "edit" && input.delegatedEdit === true
+    const leased = id === input.delegatedEdit?.operation
     if (input.user?.[id] === false || (disabled.has(id) && !leased)) delete tools[id]
   }
   return tools

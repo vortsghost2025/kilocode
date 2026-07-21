@@ -470,7 +470,7 @@ export namespace Permission {
     return rulesets.flat()
   }
 
-  const EDIT_TOOLS = ["edit", "write", "apply_patch", "multiedit"]
+  const EDIT_TOOLS = ["edit", "populate", "write", "apply_patch", "multiedit"] // kilocode_change
 
   // kilocode_change start — exported so nested-tool enforcement (e.g. BatchTool) can map tool id to permission name
   export function permissionForTool(tool: string): string {

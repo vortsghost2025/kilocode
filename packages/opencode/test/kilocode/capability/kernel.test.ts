@@ -9,6 +9,7 @@ import { BackgroundTask } from "../../../src/kilocode/background-task"
 import { BackgroundTaskTool } from "../../../src/kilocode/background-task-tool"
 import { CapabilityAuthority } from "../../../src/kilocode/capability/authority"
 import { AuthorityStore } from "../../../src/kilocode/capability/authority-store"
+import { DelegateEditTool } from "../../../src/kilocode/delegate-edit-tool"
 import { DelegatedEdit } from "../../../src/kilocode/delegated-edit"
 import { Permission } from "../../../src/permission"
 import { Instance } from "../../../src/project/instance"
@@ -247,13 +248,19 @@ describe("immutable static ceilings", () => {
     })
   })
 
-  test("verified edit lease reopens only EditTool visibility", () => {
-    const tools = filterResolvedTools({
-      tools: { edit: {}, write: {}, apply_patch: {}, bash: {} },
+  test("verified lease reopens only its exact mutation tool", () => {
+    const edit = filterResolvedTools({
+      tools: { edit: {}, populate: {}, write: {}, apply_patch: {}, bash: {} },
       agent: [{ permission: "*", pattern: "*", action: "deny" }],
-      delegatedEdit: true,
+      delegatedEdit: { operation: "edit", path: "target.ts" },
     })
-    expect(Object.keys(tools)).toEqual(["edit"])
+    const populate = filterResolvedTools({
+      tools: { edit: {}, populate: {}, write: {}, apply_patch: {}, bash: {} },
+      agent: [{ permission: "*", pattern: "*", action: "deny" }],
+      delegatedEdit: { operation: "populate", path: "empty.ts" },
+    })
+    expect(Object.keys(edit)).toEqual(["edit"])
+    expect(Object.keys(populate)).toEqual(["populate"])
   })
 
   test("direct message routing cannot cross the caller task ceiling", async () => {
@@ -474,18 +481,18 @@ test("non-Orchestrator Phase2F issuer fails before reservation or child creation
       const reserve = spyOn(DelegatedEdit, "reserve")
       const create = spyOn(Session, "create")
       try {
-        const tool = await TaskTool.init()
+        const tool = await DelegateEditTool.init()
         await expect(
           tool.execute(
             {
               description: "invalid issuer",
               prompt: "edit target",
-              subagent_type: "phase2f-implementer",
-              authorization: { operation: "edit", path: "target.ts" },
+              operation: "edit",
+              path: "target.ts",
             },
             ctx(root.session.id, root.assistant, "code"),
           ),
-        ).rejects.toThrow("Only Orchestrator")
+        ).rejects.toThrow("only Orchestrator")
         expect(reserve).toHaveBeenCalledTimes(0)
         expect(create).toHaveBeenCalledTimes(0)
       } finally {

@@ -34,21 +34,15 @@ const resume = z
     "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   )
 const command = z.string().describe("The command that triggered this task")
-const grant = DelegatedEdit.Authorization.describe(
-  "A one-shot exact-path edit authorization for a scoped implementation subagent",
-)
 const parameters = z
   .union([
     z.object(shape).strict(),
     z.object({ ...shape, task_id: resume }).strict(),
     z.object({ ...shape, command }).strict(),
     z.object({ ...shape, task_id: resume, command }).strict(),
-    z.object({ ...shape, authorization: grant }).strict(),
-    z.object({ ...shape, command, authorization: grant }).strict(),
-    z.object({ ...shape, task_id: resume, authorization: grant }).strict(),
-    z.object({ ...shape, task_id: resume, command, authorization: grant }).strict(),
   ])
   .meta({ type: "object" })
+type Params = z.infer<typeof parameters> & { authorization?: DelegatedEdit.Authorization }
 // kilocode_change end
 
 // kilocode_change start
@@ -65,8 +59,14 @@ type ForegroundOutcome =
     }
 // kilocode_change end
 
-export const TaskTool = Tool.define("task", async (ctx) => {
-  const agents = await Agent.list().then((x) => x.filter((a) => a.mode !== "primary"))
+// kilocode_change - public task and private delegated-edit launch share execution, not schemas
+async function build(ctx?: Tool.InitContext) {
+  // kilocode_change
+  // kilocode_change start
+  const agents = await Agent.list().then((x) =>
+    x.filter((a) => a.mode !== "primary" && a.name !== "phase2f-implementer"),
+  )
+  // kilocode_change end
 
   // Filter agents by permissions if agent provided
   const caller = ctx?.agent
@@ -96,20 +96,44 @@ export const TaskTool = Tool.define("task", async (ctx) => {
   )
   return {
     description,
-    parameters,
-    async execute(params: z.infer<typeof parameters>, ctx) {
+    async execute(params: Params, ctx: Tool.Context) {
       const config = await Config.get()
       const phase = params.subagent_type === "phase2f-implementer" // kilocode_change
       const resume = "task_id" in params ? params.task_id : undefined // kilocode_change
       const grant = "authorization" in params ? params.authorization : undefined // kilocode_change
 
-      // kilocode_change start - the one-shot lease is a Phase2F-only authority
-      // layer, and only Orchestrator may issue it.
+      // kilocode_change start - Phase2F is reachable only through the typed
+      // delegate_edit tool, which creates this private authorization object.
+      if (phase && !grant) {
+        throw DelegatedEdit.invalid("use the delegate_edit tool; task cannot issue edit leases")
+      }
       if (grant && !phase) {
-        throw new Error("Delegated edit authorization is restricted to Phase2F implementation tasks")
+        throw new DelegatedEdit.AuthorizationError({
+          operation: grant.operation,
+          path: grant.path,
+          reason: "authorization is restricted to Phase2F implementation tasks",
+        })
       }
       if (phase && ctx.agent !== "orchestrator") {
-        throw new Error("Only Orchestrator may authorize Phase2F implementation tasks")
+        throw new DelegatedEdit.AuthorizationError({
+          operation: grant!.operation,
+          path: grant!.path,
+          reason: "only Orchestrator may authorize Phase2F implementation tasks",
+        })
+      }
+      if (grant && resume) {
+        throw new DelegatedEdit.AuthorizationError({
+          operation: grant.operation,
+          path: grant.path,
+          reason: "delegated edit authorization cannot resume an existing task",
+        })
+      }
+      if (grant && !ctx.callID) {
+        throw new DelegatedEdit.AuthorizationError({
+          operation: grant.operation,
+          path: grant.path,
+          reason: "delegated edit authorization requires a tool call ID",
+        })
       }
       // kilocode_change end
 
@@ -122,9 +146,58 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       await AuthorityStore.load(ctx.sessionID)
       // kilocode_change end
 
+      const agent = await Agent.get(params.subagent_type)
+      if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
+      const selectedPolicy = await Agent.policy(agent.name) // kilocode_change
+      const selectedRole = selectedPolicy.length > 0 ? selectedPolicy : agent.permission // kilocode_change
+      // kilocode_change start — reject primary agents; only subagent/all modes allowed
+      if (agent.mode === "primary")
+        throw new Error(`Agent "${params.subagent_type}" is a primary agent and cannot be used as a subagent`)
+      // kilocode_change end
+
+      // kilocode_change start — canonicalize and validate delegated authority
+      // before permission prompts, child creation, or worker request launch.
+      const authorization = grant
+        ? (() => {
+            const scope = DelegatedEdit.scope(grant)
+            if (
+              CapabilityAuthority.evaluate({
+                permission: "edit",
+                pattern: scope.path,
+                role: selectedRole,
+                agent: agent.permission,
+              }).action !== "allow"
+            ) {
+              throw new DelegatedEdit.AuthorizationError({
+                operation: scope.operation,
+                path: scope.path,
+                reason: `agent "${agent.name}" does not allow delegated edits`,
+              })
+            }
+            return scope
+          })()
+        : undefined
+      const reservation = authorization
+        ? DelegatedEdit.reserve({ parent: ctx.sessionID, call: ctx.callID!, scope: authorization })
+        : undefined
+      using _reservation = reservation ? defer(() => DelegatedEdit.release(reservation)) : undefined
+      // kilocode_change end
+
       // Skip permission check when user explicitly invoked via @ or command subtask
       // kilocode_change start
-      if (ctx.extra?.bypassAgentCheck) {
+      if (authorization) {
+        await ctx.ask({
+          permission: "delegate_edit",
+          patterns: [agent.name],
+          always: [],
+          metadata: {
+            description: params.description,
+            subagent_type: agent.name,
+            operation: authorization.operation,
+            path: authorization.path,
+          },
+        })
+      } else if (ctx.extra?.bypassAgentCheck) {
         // A direct user mention may satisfy an ask, but
         // it is not authority to cross the caller's static or inherited deny.
         const rule = CapabilityAuthority.evaluate({
@@ -148,54 +221,6 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           metadata: {
             description: params.description,
             subagent_type: params.subagent_type,
-          },
-        })
-      }
-      // kilocode_change end
-
-      const agent = await Agent.get(params.subagent_type)
-      if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
-      const selectedPolicy = await Agent.policy(agent.name) // kilocode_change
-      const selectedRole = selectedPolicy.length > 0 ? selectedPolicy : agent.permission // kilocode_change
-      // kilocode_change start — reject primary agents; only subagent/all modes allowed
-      if (agent.mode === "primary")
-        throw new Error(`Agent "${params.subagent_type}" is a primary agent and cannot be used as a subagent`)
-      if (phase && !grant) throw new Error("Phase2F requires a structured exact-path edit authorization")
-      // kilocode_change end
-
-      // kilocode_change start — validate one-shot edit delegation before creating a child session
-      const authorization = grant
-        ? (() => {
-            if (resume) throw new Error("Delegated edit authorization cannot resume an existing task")
-            if (!ctx.callID) throw new Error("Delegated edit authorization requires a task call ID")
-            const scope = DelegatedEdit.scope(grant)
-            if (
-              CapabilityAuthority.evaluate({
-                permission: "edit",
-                pattern: scope.path,
-                role: selectedRole,
-                agent: agent.permission,
-              }).action !== "allow"
-            ) {
-              throw new Error(`Agent "${agent.name}" does not allow delegated edits`)
-            }
-            return scope
-          })()
-        : undefined
-      const reservation = authorization
-        ? DelegatedEdit.reserve({ parent: ctx.sessionID, call: ctx.callID!, scope: authorization })
-        : undefined
-      using _reservation = reservation ? defer(() => DelegatedEdit.release(reservation)) : undefined
-      if (authorization) {
-        await ctx.ask({
-          permission: "delegate_edit",
-          patterns: [agent.name],
-          always: [],
-          metadata: {
-            description: params.description,
-            subagent_type: agent.name,
-            operation: authorization.operation,
-            path: authorization.path,
           },
         })
       }
@@ -391,7 +416,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
                       "<delegated_edit_lease>\n" +
                       DelegatedEdit.canonicalLeaseText(binding.lease) +
                       "\n</delegated_edit_lease>\n\n" +
-                      'When you call the edit tool for the authorized path, you MUST include an evidenceRecall object whose source is "delegated-edit-lease" and whose exactText reproduces the lease text above character-for-character (the single block between the <delegated_edit_lease> tags). Do not omit it; do not paraphrase. A missing or mismatched evidenceRecall will fail closed with EVIDENCE_RECALL_FAILED before your edit is applied.',
+                      `When you call the ${binding.lease.scope.operation} tool for the authorized path, you MUST include an evidenceRecall object whose source is "delegated-edit-lease" and whose exactText reproduces the lease text above character-for-character (the single block between the <delegated_edit_lease> tags). Do not omit it; do not paraphrase. A missing or mismatched evidenceRecall will fail closed with EVIDENCE_RECALL_FAILED before your mutation is applied.`,
                   },
                   ...promptParts,
                 ]
@@ -407,9 +432,15 @@ export const TaskTool = Tool.define("task", async (ctx) => {
             },
             agent: agent.name,
             tools: {
-              // kilocode_change start — Phase2F exposes only EditTool for mutation and delegates validation
+              // kilocode_change start — Phase2F exposes only the exact leased
+              // mutation operation and delegates path validation.
               ...(phase
-                ? { bash: false, write: false, apply_patch: false }
+                ? {
+                    bash: false,
+                    write: false,
+                    apply_patch: false,
+                    ...(authorization?.operation === "populate" ? { edit: false } : { populate: false }),
+                  }
                 : authorization
                   ? { write: false, apply_patch: false }
                   : {}),
@@ -484,4 +515,16 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       }
     },
   }
-})
+}
+
+// kilocode_change start
+export async function runDelegatedEdit(
+  params: { description: string; prompt: string; authorization: DelegatedEdit.Authorization },
+  ctx: Tool.Context,
+) {
+  const tool = await build()
+  return tool.execute({ ...params, subagent_type: "phase2f-implementer" }, ctx)
+}
+
+export const TaskTool = Tool.define("task", async (ctx) => ({ ...(await build(ctx)), parameters }))
+// kilocode_change end

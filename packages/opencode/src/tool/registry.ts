@@ -8,6 +8,8 @@ import { BatchTool } from "./batch"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
 import { BackgroundTaskTool } from "@/kilocode/background-task-tool" // kilocode_change
+import { DelegateEditTool } from "@/kilocode/delegate-edit-tool" // kilocode_change
+import { PopulateTool } from "@/kilocode/populate-tool" // kilocode_change
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
@@ -144,8 +146,10 @@ export namespace ToolRegistry {
           GlobTool,
           GrepTool,
           EditTool,
+          PopulateTool, // kilocode_change
           WriteTool,
           TaskTool,
+          DelegateEditTool, // kilocode_change
           BackgroundTaskTool, // kilocode_change
           WebFetchTool,
           TodoWriteTool,
