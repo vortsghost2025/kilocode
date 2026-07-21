@@ -15,6 +15,7 @@ import type { Provider } from "@/provider/provider"
 import { Agent } from "@/agent/agent" // kilocode_change
 import type { Permission } from "@/permission" // kilocode_change
 import { Skill } from "@/skill"
+import { CapabilityBundle } from "@/kilocode/capability/bundles"
 
 // kilocode_change start
 import SOUL from "../kilocode/soul.txt"
@@ -89,12 +90,12 @@ export namespace SystemPrompt {
     const { AuthorityStore } = await import("@/kilocode/capability/authority-store")
     if (sessionID) await AuthorityStore.load(sessionID)
     const { CapabilityAuthority } = await import("@/kilocode/capability/authority")
-    const policy = await Agent.policy(agent.name)
-    const role = policy.length > 0 ? policy : agent.permission
+    const policy = await Agent.policy(agent.name) // kilocode_change
+    const ruleset = policy.length > 0 ? policy : agent.permission // kilocode_change
     if (
       CapabilityAuthority.disabled({
         tools: ["skill"],
-        role,
+        role: ruleset,
         agent: agent.permission,
         session: permission,
         sessionID,
@@ -102,14 +103,42 @@ export namespace SystemPrompt {
     )
       return
 
-    const list = await Skill.available(agent, permission, role, sessionID) // kilocode_change
+    const allAgents = await Agent.list()
+    const knownRoles = allAgents
+      .filter((a) => !a.hidden)
+      .filter((a) => !a.deprecated)
+      .map((a) => a.name)
+
+    const allSkills = await Skill.all()
+    const discoveredSkills = allSkills.map((s) => s.name)
+
+    const disclosed = await CapabilityBundle.resolveForPrompt({
+      repoRoot: Instance.worktree,
+      role: agent.name, // kilocode_change
+      knownRoles,
+      discoveredSkills,
+      getAvailableSkills: () => Skill.available(agent, permission, ruleset, sessionID),
+    })
+
+    if (disclosed.status === "no-bundle") {
+      return "No capability bundle is configured for this agent role. Skills disabled."
+    }
+
+    if (disclosed.status === "configured-empty") {
+      return "Capability bundle configured with zero disclosed skills."
+    }
+
+    if (disclosed.status === "configuration-error") {
+      return "[CapabilityBundle: configuration error — skill disclosure unavailable]"
+    }
 
     return [
       "Skills provide specialized instructions and workflows for specific tasks.",
       "Use the skill tool to load a skill when a task matches its description.",
       // the agents seem to ingest the information about skills a bit better if we present a more verbose
       // version of them here and a less verbose version in tool description, rather than vice versa.
-      Skill.fmt(list, { verbose: true }),
+      Skill.fmt(disclosed.skills, { verbose: true }),
+      `## Capability Context: ${disclosed.skills.length} skills, ${disclosed.estimatedContextTokens} estimated tokens per turn (${disclosed.contentCharacters} description characters)`,
     ].join("\n")
   }
   // kilocode_change end
