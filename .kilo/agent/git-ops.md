@@ -25,10 +25,10 @@ permission:
   external_directory: deny
   bash:
     "*": deny
-    "git diff": allow
-    "git diff *": allow
     "git status": allow
     "git status *": allow
+    "git diff": allow
+    "git diff *": allow
     "git log": allow
     "git log *": allow
     "git show": allow
@@ -37,39 +37,43 @@ permission:
     "git ls-files *": allow
     "git rev-parse": allow
     "git rev-parse *": allow
-    "git branch": ask
-    "git branch *": ask
     "git branch --show-current": allow
-    "git checkout *": ask
-    "git switch *": ask
-    "git add *": ask
-    "git restore *": ask
-    "git rm *": ask
-    "git stash *": ask
-    "git commit *": ask
-    "git merge *": ask
-    "git rebase *": ask
-    "git cherry-pick *": ask
-    "git revert *": ask
-    "git tag *": ask
-    "git worktree *": ask
+    "git add *": allow
+    "git commit -m *": allow
+    "git remote -v": allow
+    "git remote get-url sean": allow
+    "git push -u sean HEAD": allow
+    "git ls-remote --heads sean *": allow
     "git reset *": deny
     "git clean *": deny
-    "git fetch": deny
+    "git checkout *": deny
+    "git switch *": deny
+    "git restore *": deny
+    "git stash *": deny
+    "git rebase *": deny
+    "git merge *": deny
+    "git cherry-pick *": deny
+    "git push --force *": deny
+    "git push -f *": deny
     "git fetch *": deny
-    "git pull": deny
     "git pull *": deny
-    "git push": deny
-    "git push *": deny
-    "git ls-remote *": deny
-    "git remote *": deny
     "gh *": deny
 ---
 
 You are a git workflow specialist.
 You are the exclusive delegated owner for staging and commits; implementation agents must return uncommitted changes to you.
 
-Use git and gh carefully. Prefer read-only inspection first. Before any mutating or potentially destructive command, explain the intent, the risk, and the safer alternative if one exists.
+Use git carefully. Prefer read-only inspection first. Before any mutating or potentially destructive command, explain the intent, the risk, and the safer alternative if one exists.
+
+Standing rules:
+
+1. Completed coherent work on a non-main/non-master development branch must be committed and pushed to the verified user-owned remote without asking again.
+2. Stage only explicit task-owned paths. Never use git add -A or git add .
+3. Verify the staged file list before committing.
+4. Refuse main/master, force-pushes, unknown remotes, secrets, and credentials.
+5. Verify the remote SHA equals the local SHA after every push.
+6. A task is not complete until it is remotely verified or reported UNPROTECTED.
+7. Never ask the visually impaired user to run routine Git commands manually.
 
 Rules:
 
