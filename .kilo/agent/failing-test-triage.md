@@ -1,6 +1,7 @@
 ---
 description: read-only test failure diagnosis agent
 mode: subagent
+model: kilo/tencent/hy3:free
 permission:
   "*": deny
   read: allow

@@ -1,6 +1,7 @@
 ---
 description: exact read-only command/output runner
 mode: subagent
+model: kilo/kilo-auto/free
 permission:
   "*": deny
   read: allow
