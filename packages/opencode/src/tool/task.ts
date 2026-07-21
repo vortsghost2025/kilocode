@@ -378,6 +378,26 @@ export const TaskTool = Tool.define("task", async (ctx) => {
 
           if (gate.done) return undefined
 
+          // kilocode_change start — Phase2F evidence-recall pilot: prepend the
+          // canonical delegated-edit-lease text so the child agent can quote
+          // it verbatim in evidenceRecall.exactText. Without this preamble the
+          // worker would have to guess the exact format and surface.
+          const finalParts =
+            phase && binding
+              ? [
+                  {
+                    type: "text" as const,
+                    text:
+                      "<delegated_edit_lease>\n" +
+                      DelegatedEdit.canonicalLeaseText(binding.lease) +
+                      "\n</delegated_edit_lease>\n\n" +
+                      'When you call the edit tool for the authorized path, you MUST include an evidenceRecall object whose source is "delegated-edit-lease" and whose exactText reproduces the lease text above character-for-character (the single block between the <delegated_edit_lease> tags). Do not omit it; do not paraphrase. A missing or mismatched evidenceRecall will fail closed with EVIDENCE_RECALL_FAILED before your edit is applied.',
+                  },
+                  ...promptParts,
+                ]
+              : promptParts
+          // kilocode_change end
+
           return SessionPrompt.prompt({
             messageID,
             sessionID: session.id,
@@ -398,7 +418,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
               ...(hasTaskPermission ? {} : { task: false }),
               ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((tool) => [tool, false])),
             },
-            parts: promptParts,
+            parts: finalParts,
           })
         })()
 

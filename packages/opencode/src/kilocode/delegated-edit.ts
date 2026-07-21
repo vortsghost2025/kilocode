@@ -151,12 +151,57 @@ export namespace DelegatedEdit {
     }
   }
 
+  export class EvidenceFailedError extends Error {
+    readonly path: string
+    constructor(path: string) {
+      const message =
+        "EVIDENCE_RECALL_FAILED\nsource: delegated-edit-lease\n" + `path: ${path}\nno_tool_call_executed: true`
+      super(message)
+      this.name = "EvidenceFailedError"
+      this.path = path
+    }
+  }
+
+  export class LeaseExhaustedError extends Error {
+    readonly path: string
+    readonly allowed: number
+    readonly used: number
+    constructor(path: string) {
+      const message = `EDIT_LEASE_EXHAUSTED\npath: ${path}\nallowed: 1\nused: 1`
+      super(message)
+      this.name = "LeaseExhaustedError"
+      this.path = path
+      this.allowed = 1
+      this.used = 1
+    }
+  }
+
+  export const EvidenceRecall = z
+    .object({
+      source: z.literal("delegated-edit-lease"),
+      exactText: z.string(),
+      purpose: z.string(),
+    })
+    .strict()
+
+  export type EvidenceRecall = z.infer<typeof EvidenceRecall>
+
+  export function canonicalLeaseText(lease: Lease, usedEdits: 0 | 1 = 0): string {
+    return (
+      "Phase2F delegated edit lease:\n" +
+      `path: ${lease.scope.path}\n` +
+      "allowed edits: 1\n" +
+      `used edits: ${usedEdits}`
+    )
+  }
+
   export function authorize(input: {
     sessionID: SessionID
     operation?: string
     permission: string
     patterns: string[]
     session: Permission.Ruleset
+    evidence?: EvidenceRecall
   }): boolean {
     if (input.permission !== "edit") return false
 
@@ -176,9 +221,20 @@ export namespace DelegatedEdit {
     const grant = current.grants.get(input.sessionID)
     if (!grant) return deny(input.session)
     if (grant.child !== input.sessionID || binding !== key(grant)) deny(input.session)
-    if (grant.consumed || input.operation !== grant.scope.operation) deny(input.session)
+    if (input.operation !== grant.scope.operation) deny(input.session)
     if (input.patterns.length !== 1 || normalize(input.patterns[0] ?? "") !== normalize(grant.scope.path)) {
       deny(input.session)
+    }
+    if (grant.consumed) throw new LeaseExhaustedError(grant.scope.path)
+    if (input.evidence === undefined) {
+      throw new EvidenceFailedError(grant.scope.path)
+    }
+    if (input.evidence.source !== "delegated-edit-lease") {
+      throw new EvidenceFailedError(grant.scope.path)
+    }
+    const expected = canonicalLeaseText(grant, 0)
+    if (input.evidence.exactText !== expected) {
+      throw new EvidenceFailedError(grant.scope.path)
     }
     grant.consumed = true
     return true

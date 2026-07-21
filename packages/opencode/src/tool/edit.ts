@@ -64,6 +64,17 @@ export const EditTool = Tool.define("edit", {
     oldString: z.string().describe("The text to replace"),
     newString: z.string().describe("The text to replace it with (must be different from oldString)"),
     replaceAll: z.boolean().optional().describe("Replace all occurrences of oldString (default false)"),
+    evidenceRecall: z
+      .object({
+        source: z.literal("delegated-edit-lease"),
+        exactText: z.string(),
+        purpose: z.string(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "Required for Phase2F delegated edits: a verbatim copy of the canonical delegated-edit-lease text the runtime delivered to the child session, plus a one-sentence purpose for this edit. Non-Phase2F callers omit it.",
+      ),
   }),
   async execute(params, ctx) {
     if (!params.filePath) {
@@ -96,6 +107,7 @@ export const EditTool = Tool.define("edit", {
             filepath: filePath,
             diff,
             filediff: cachedFilediff, // kilocode_change
+            evidenceRecall: params.evidenceRecall, // kilocode_change — evidence-recall pilot
           },
         })
         await Filesystem.write(filePath, params.newString)
@@ -133,6 +145,7 @@ export const EditTool = Tool.define("edit", {
           filepath: filePath,
           diff,
           filediff: cachedFilediff, // kilocode_change
+          evidenceRecall: params.evidenceRecall, // kilocode_change — evidence-recall pilot
         },
       })
 
