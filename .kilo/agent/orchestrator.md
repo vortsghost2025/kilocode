@@ -39,6 +39,13 @@ permission:
     strict-code-review: allow
   bash:
     "*": deny
+    "bun test": allow
+    "bun test *": allow
+    "bun run typecheck": allow
+    "bun run typecheck *": allow
+    "bun run verify:wave-1a": allow
+    "bun run verify:staged-scope *": allow
+    "bunx prettier --check *": allow
     "git status": allow
     "git status *": allow
     "git diff": allow
