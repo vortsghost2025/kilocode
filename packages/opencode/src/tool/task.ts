@@ -60,8 +60,7 @@ type ForegroundOutcome =
 // kilocode_change end
 
 // kilocode_change - public task and private delegated-edit launch share execution, not schemas
-async function build(ctx?: Tool.InitContext) {
-  // kilocode_change
+async function build(ctx?: Tool.InitContext) /* kilocode_change */ {
   // kilocode_change start
   const agents = await Agent.list().then((x) =>
     x.filter((a) => a.mode !== "primary" && a.name !== "phase2f-implementer"),
@@ -96,8 +95,8 @@ async function build(ctx?: Tool.InitContext) {
   )
   return {
     description,
-    async execute(params: Params, ctx: Tool.Context) {
-      const config = await Config.get()
+    async execute(params: Params, ctx: Tool.Context) /* kilocode_change */ {
+      const config = await Config.get() // kilocode_change
       const phase = params.subagent_type === "phase2f-implementer" // kilocode_change
       const resume = "task_id" in params ? params.task_id : undefined // kilocode_change
       const grant = "authorization" in params ? params.authorization : undefined // kilocode_change
@@ -183,7 +182,7 @@ async function build(ctx?: Tool.InitContext) {
       using _reservation = reservation ? defer(() => DelegatedEdit.release(reservation)) : undefined
       // kilocode_change end
 
-      // Skip permission check when user explicitly invoked via @ or command subtask
+      // kilocode_change - Skip permission check when user explicitly invoked via @ or command subtask
       // kilocode_change start
       if (authorization) {
         await ctx.ask({
@@ -515,7 +514,7 @@ async function build(ctx?: Tool.InitContext) {
       }
     },
   }
-}
+} /* kilocode_change */
 
 // kilocode_change start
 export async function runDelegatedEdit(
