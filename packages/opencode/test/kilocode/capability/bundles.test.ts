@@ -114,13 +114,18 @@ describe("CapabilityBundle", () => {
       await mkdir(dir, { recursive: true })
       await Bun.write(join(dir, "test.json"), JSON.stringify({ id: "test", roles: ["role"], skills: ["unknown"] }))
 
-      expect(() =>
-        CapabilityBundle.loadAll({
+      const warnings: string[] = []
+      const manifests = CapabilityBundle.loadAll(
+        {
           repoRoot: tmp.path,
           knownRoles: ["role"],
           discoveredSkills: ["known"],
-        }),
-      ).toThrow(/Unknown skill "unknown"/)
+        },
+        warnings,
+      )
+      expect(manifests).toEqual([{ id: "test", roles: ["role"], skills: [], notes: "" }])
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain('Unknown skill "unknown"')
     })
 
     test("duplicate ID across files", async () => {
@@ -177,13 +182,22 @@ describe("CapabilityBundle", () => {
       await Bun.write(join(dir, "a.json"), JSON.stringify({ id: "a", roles: ["r1"], skills: ["s1"] }))
       await Bun.write(join(dir, "b.json"), JSON.stringify({ id: "b", roles: ["r1"], skills: ["s1"] }))
 
-      expect(() =>
-        CapabilityBundle.loadAll({
+      const warnings: string[] = []
+      const manifests = CapabilityBundle.loadAll(
+        {
           repoRoot: tmp.path,
           knownRoles: ["r1"],
           discoveredSkills: ["s1"],
-        }),
-      ).toThrow(/Duplicate \(role, skill\) pair across manifests/)
+        },
+        warnings,
+      )
+
+      expect(manifests).toEqual([
+        { id: "a", roles: ["r1"], skills: ["s1"], notes: "" },
+        { id: "b", roles: ["r1"], skills: ["s1"], notes: "" },
+      ])
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain("Duplicate (role, skill) pair across manifests")
     })
 
     test("omitted notes normalize to empty string", async () => {
