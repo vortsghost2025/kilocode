@@ -3,8 +3,31 @@ import { readFileSync, existsSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { Glob } from "@/util/glob"
 import { Skill } from "@/skill"
+import { Log } from "@/util/log"
 
 export namespace CapabilityBundle {
+  const log = Log.create({ service: "capability-bundle" })
+
+  type Category =
+    | "unknown-role"
+    | "unknown-skill"
+    | "duplicate-pair"
+    | "malformed-json"
+    | "invalid-schema"
+    | "duplicate-id"
+    | "configuration-error"
+
+  type Diagnostic = { category: Category; manifestID?: string; roles: string[] }
+
+  class BundleError extends Error {
+    constructor(
+      message: string,
+      readonly diagnostic: Diagnostic,
+    ) {
+      super(message)
+    }
+  }
+
   export const ManifestSchema = z
     .object({
       id: z.string().regex(/^[a-z0-9-]+$/),
@@ -31,9 +54,14 @@ export namespace CapabilityBundle {
     skillCount: number
     contentCharacters: number
     estimatedContextTokens: number
+    warnings: string[]
   }
 
-  export function loadAll(opts: { repoRoot: string; knownRoles: string[]; discoveredSkills: string[] }): Manifest[] {
+  function loadInternal(
+    opts: { repoRoot: string; knownRoles: string[]; discoveredSkills: string[] },
+    warnings: string[],
+    diagnostics: Diagnostic[],
+  ): Manifest[] {
     const dir = join(opts.repoRoot, ".kilo", "capability")
     if (!existsSync(dir) || !statSync(dir).isDirectory()) {
       return []
@@ -52,37 +80,66 @@ export namespace CapabilityBundle {
       try {
         raw = JSON.parse(readFileSync(file, "utf-8"))
       } catch (err) {
-        throw new Error(`Malformed JSON in bundle manifest: ${file}`)
+        throw new BundleError(`Malformed JSON in bundle manifest: ${file}`, {
+          category: "malformed-json",
+          roles: [],
+        })
       }
 
       const result = ManifestSchema.safeParse(raw)
       if (!result.success) {
-        throw new Error(`Invalid bundle manifest schema in ${file}: ${result.error.message}`)
+        throw new BundleError(`Invalid bundle manifest schema in ${file}: ${result.error.message}`, {
+          category: "invalid-schema",
+          roles: [],
+        })
       }
-      const manifest = result.data
+      const data = result.data
 
-      if (ids.has(manifest.id)) {
-        throw new Error(`Duplicate bundle ID: ${manifest.id}`)
+      const roles = data.roles.filter((role) => knownRoles.has(role))
+      if (roles.length !== data.roles.length) {
+        const firstUnknown = data.roles.find((role) => !knownRoles.has(role))
+        throw new BundleError(`Unknown role "${firstUnknown}" in bundle manifest: ${data.id} (${file})`, {
+          category: "unknown-role",
+          manifestID: data.id,
+          roles,
+        })
       }
-      ids.add(manifest.id)
 
-      for (const role of manifest.roles) {
-        if (!knownRoles.has(role)) {
-          throw new Error(`Unknown role "${role}" in bundle manifest: ${manifest.id}`)
-        }
+      if (ids.has(data.id)) {
+        throw new BundleError(`Duplicate bundle ID: ${data.id}`, {
+          category: "duplicate-id",
+          manifestID: data.id,
+          roles,
+        })
       }
+      ids.add(data.id)
 
-      for (const skill of manifest.skills) {
+      const skills: string[] = []
+      let hasUnknownSkill = false
+      for (const skill of data.skills) {
         if (!discoveredSkills.has(skill)) {
-          throw new Error(`Unknown skill "${skill}" in bundle manifest: ${manifest.id}`)
+          warnings.push(`Unknown skill "${skill}" in bundle manifest: ${data.id} (${file})`)
+          hasUnknownSkill = true
+          continue
         }
+        skills.push(skill)
+      }
+      if (hasUnknownSkill) {
+        diagnostics.push({ category: "unknown-skill", manifestID: data.id, roles })
+      }
+
+      const manifest: Manifest = {
+        ...data,
+        roles,
+        skills,
       }
 
       for (const role of manifest.roles) {
         for (const skill of manifest.skills) {
           const pair = `${role}:${skill}`
           if (roleSkillPairs.has(pair)) {
-            throw new Error(`Duplicate (role, skill) pair across manifests: ${pair} (found in ${manifest.id})`)
+            warnings.push(`Duplicate (role, skill) pair across manifests: ${pair} (found in ${manifest.id})`)
+            diagnostics.push({ category: "duplicate-pair", manifestID: manifest.id, roles: [role] })
           }
           roleSkillPairs.add(pair)
         }
@@ -94,9 +151,22 @@ export namespace CapabilityBundle {
     return manifests
   }
 
-  export function disclose(opts: { role: string; manifests: Manifest[]; availableSkills: Skill.Info[] }): Disclosed {
+  export function loadAll(
+    opts: { repoRoot: string; knownRoles: string[]; discoveredSkills: string[] },
+    warnings: string[] = [],
+  ): Manifest[] {
+    return loadInternal(opts, warnings, [])
+  }
+
+  export function disclose(opts: {
+    role: string
+    manifests: Manifest[]
+    availableSkills: Skill.Info[]
+    warnings?: string[]
+  }): Disclosed {
     const matched = opts.manifests.filter((m) => m.roles.includes(opts.role))
     const matchedBundles = matched.map((m) => m.id)
+    const warnings = opts.warnings ?? []
 
     if (matchedBundles.length === 0) {
       return {
@@ -106,6 +176,7 @@ export namespace CapabilityBundle {
         skillCount: 0,
         contentCharacters: 0,
         estimatedContextTokens: 0,
+        warnings,
       }
     }
 
@@ -120,6 +191,7 @@ export namespace CapabilityBundle {
         skillCount: 0,
         contentCharacters: 0,
         estimatedContextTokens: 0,
+        warnings,
       }
     }
 
@@ -132,6 +204,7 @@ export namespace CapabilityBundle {
       skillCount: skills.length,
       contentCharacters,
       estimatedContextTokens: Math.ceil(contentCharacters / 4),
+      warnings,
     }
   }
 
@@ -139,11 +212,21 @@ export namespace CapabilityBundle {
     repoRoot: string
     knownRoles: string[]
     discoveredSkills: string[]
-  }): Manifest[] | null => {
+  }): { manifests: Manifest[] | null; warnings: string[]; diagnostics: Diagnostic[] } => {
+    const warnings: string[] = []
+    const diagnostics: Diagnostic[] = []
     try {
-      return loadAll(opts)
-    } catch {
-      return null
+      const manifests = loadInternal(opts, warnings, diagnostics)
+      return { manifests, warnings, diagnostics }
+    } catch (err) {
+      if (err instanceof BundleError) {
+        return { manifests: null, warnings: [err.message], diagnostics: [err.diagnostic] }
+      }
+      return {
+        manifests: null,
+        warnings: [err instanceof Error ? err.message : String(err)],
+        diagnostics: [{ category: "configuration-error", roles: [] }],
+      }
     }
   }
 
@@ -154,12 +237,22 @@ export namespace CapabilityBundle {
     discoveredSkills: string[]
     getAvailableSkills: () => Promise<Skill.Info[]>
   }): Promise<Disclosed> {
-    const manifests = safeLoad({
+    const { manifests, warnings, diagnostics } = safeLoad({
       repoRoot: opts.repoRoot,
       knownRoles: opts.knownRoles,
       discoveredSkills: opts.discoveredSkills,
     })
     if (manifests === null) {
+      const diag = diagnostics[0]
+      const extra: Record<string, string | number> = {
+        role: opts.role,
+        category: diag.category,
+        count: warnings.length,
+      }
+      if (diag.manifestID && diag.roles.includes(opts.role)) {
+        extra.manifestID = diag.manifestID
+      }
+      log.error("capability bundle configuration error", extra)
       return {
         status: "configuration-error",
         skills: [],
@@ -167,14 +260,26 @@ export namespace CapabilityBundle {
         skillCount: 0,
         contentCharacters: 0,
         estimatedContextTokens: 0,
+        warnings,
       }
     }
     const availableSkills = await opts.getAvailableSkills()
-    return disclose({
+    const result = disclose({
       role: opts.role,
       manifests,
       availableSkills,
+      warnings,
     })
+    for (const diag of diagnostics) {
+      if (diag.roles.includes(opts.role)) {
+        log.warn("capability bundle issue", {
+          role: opts.role,
+          category: diag.category,
+          manifestID: diag.manifestID,
+        })
+      }
+    }
+    return result
   }
 }
 
