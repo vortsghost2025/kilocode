@@ -15,7 +15,7 @@ import type { Provider } from "@/provider/provider"
 import { Agent } from "@/agent/agent" // kilocode_change
 import type { Permission } from "@/permission" // kilocode_change
 import { Skill } from "@/skill"
-import { CapabilityBundle } from "@/kilocode/capability/bundles"
+import { CapabilityBundle } from "@/kilocode/capability/bundles" // kilocode_change
 
 // kilocode_change start
 import SOUL from "../kilocode/soul.txt"
