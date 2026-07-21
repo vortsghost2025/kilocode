@@ -17,11 +17,8 @@
         "glob": "allow",
         "grep": "allow",
         "list": "allow",
-        "edit": {
-          "*": "allow",
-          "packages/opencode/migration/*": "deny",
-        },
-        "write": "allow",
+        "edit": "deny",
+        "write": "deny",
         "task": "deny",
         "background_task": "deny",
         "todowrite": "deny",
@@ -87,7 +84,7 @@
       },
     },
     "explore": {
-      "model": "nvidia/nvidia/nemotron-3-super-120b-a12b",
+      "model": "kilo/kilo-auto/free",
       "mode": "subagent",
       "permission": {
         "read": "allow",
@@ -137,11 +134,8 @@
         "glob": "allow",
         "grep": "allow",
         "list": "allow",
-        "edit": {
-          "*": "allow",
-          "packages/opencode/migration/*": "deny",
-        },
-        "write": "allow",
+        "edit": "deny",
+        "write": "deny",
         "task": "deny",
         "background_task": "deny",
         "todowrite": "deny",
@@ -203,18 +197,15 @@
       },
     },
     "debug": {
-      "model": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+      "model": "kilo/tencent/hy3:free",
       "mode": "subagent",
       "permission": {
         "read": "allow",
         "glob": "allow",
         "grep": "allow",
         "list": "allow",
-        "edit": {
-          "*": "ask",
-          "packages/opencode/migration/*": "deny",
-        },
-        "write": "ask",
+        "edit": "deny",
+        "write": "deny",
         "task": "deny",
         "background_task": "deny",
         "todowrite": "deny",
