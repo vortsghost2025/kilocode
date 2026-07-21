@@ -1459,6 +1459,83 @@ describe("delegated edit authorization", () => {
     })
   })
 
+  test("evidence retry full cycle — missing → retry OK → replay exhausted → sibling denied → post-task denied", async () => {
+    await using tmp = await tmpdir({ git: true, init: (dir) => copy(dir, ["reviewer"]) })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const parent = await Session.create({ title: "parent" })
+        const child = await Session.create({ title: "child", parentID: parent.id })
+        const scope = DelegatedEdit.scope({ operation: "edit", path: ".kilo/agent/reviewer.md" })
+        const lease = { parent: parent.id, child: child.id, call: "evidence-full-cycle", scope }
+        const rules = DelegatedEdit.rules(lease)
+        const reservation = DelegatedEdit.reserve(lease)
+        const binding = DelegatedEdit.bind(reservation, child.id)
+        const input = (recall?: DelegatedEdit.EvidenceRecall, paths?: string[]) => ({
+          sessionID: child.id,
+          operation: "edit",
+          permission: "edit",
+          patterns: paths ?? [scope.path],
+          session: rules,
+          evidence: recall,
+        })
+        try {
+          // 2. First attempt: missing evidence → EvidenceFailedError
+          try {
+            DelegatedEdit.authorize(input())
+            expect("should throw").toBe("EvidenceFailedError")
+          } catch (err) {
+            expect(err).toBeInstanceOf(DelegatedEdit.EvidenceFailedError)
+          }
+
+          // 3. Grant remains unconsumed
+          expect(DelegatedEdit.inspect(child.id)?.consumed).toBe(false)
+
+          // 4. Second attempt: valid evidence succeeds
+          const text = DelegatedEdit.canonicalLeaseText(lease, 0)
+          const recall = { source: "delegated-edit-lease" as const, exactText: text, purpose: "full cycle" }
+          expect(DelegatedEdit.authorize(input(recall))).toBe(true)
+          expect(DelegatedEdit.inspect(child.id)?.consumed).toBe(true)
+
+          // 5. Third attempt: replay denied → LeaseExhaustedError
+          try {
+            DelegatedEdit.authorize(input(recall))
+            expect("should throw").toBe("LeaseExhaustedError")
+          } catch (err) {
+            expect(err).toBeInstanceOf(DelegatedEdit.LeaseExhaustedError)
+          }
+
+          // 6. Sibling-path denied → Permission.DeniedError
+          try {
+            DelegatedEdit.authorize(input(recall, [".kilo/agent/orchestrator.md"]))
+            expect("should throw").toBe("Permission.DeniedError")
+          } catch (err) {
+            expect(err).toBeInstanceOf(Permission.DeniedError)
+          }
+        } finally {
+          binding.release()
+        }
+
+        // 7. Assert released
+        expect(DelegatedEdit.inspect(child.id)).toBe(undefined)
+
+        // 8. Post-task (post-release) denied → Permission.DeniedError
+        try {
+          DelegatedEdit.authorize(
+            input({
+              source: "delegated-edit-lease" as const,
+              exactText: DelegatedEdit.canonicalLeaseText(lease, 0),
+              purpose: "post-release",
+            }),
+          )
+          expect("should throw").toBe("Permission.DeniedError")
+        } catch (err) {
+          expect(err).toBeInstanceOf(Permission.DeniedError)
+        }
+      },
+    })
+  })
+
   test("wrong operation on consumed grant throws DeniedError before exhaustion check", async () => {
     await using tmp = await tmpdir({ git: true, init: (dir) => copy(dir, ["reviewer"]) })
     await Instance.provide({
