@@ -1,0 +1,14 @@
+{
+  "id": "phase2f-implementer",
+  "roles": ["phase2f-implementer"],
+  "skills": [
+    "brainstorming",
+    "capability-security-review",
+    "conventions",
+    "evidence-handoff",
+    "focused-test-validation",
+    "monorepo",
+    "repo-state-verification"
+  ],
+  "notes": "Scoped TypeScript implementation worker supervised by Orchestrator."
+}

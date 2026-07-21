@@ -1,0 +1,19 @@
+{
+  "id": "development",
+  "roles": ["code", "debug"],
+  "skills": [
+    "kilo-config",
+    "conventions",
+    "monorepo",
+    "focused-test-validation",
+    "bounded-source-patch",
+    "baseline-failure-classification",
+    "debug",
+    "testing",
+    "evidence-handoff",
+    "repo-state-verification",
+    "capability-security-review",
+    "code-review"
+  ],
+  "notes": "Primary development agents need practical coding, debugging, testing, security, and code review skills. Reduces prompt context from 19 to 12."
+}

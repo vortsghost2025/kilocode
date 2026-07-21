@@ -1,0 +1,6 @@
+{
+  "id": "command-check",
+  "roles": ["command-check"],
+  "skills": [],
+  "notes": "Exact read-only command/output runner — no skill disclosure by design."
+}

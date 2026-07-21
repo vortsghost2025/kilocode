@@ -1,0 +1,6 @@
+{
+  "id": "git-ops",
+  "roles": ["git-ops"],
+  "skills": ["evidence-handoff", "repo-state-verification"],
+  "notes": "Safe git workflow specialist."
+}

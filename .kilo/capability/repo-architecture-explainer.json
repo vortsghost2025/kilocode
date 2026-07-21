@@ -1,0 +1,6 @@
+{
+  "id": "repo-architecture-explainer",
+  "roles": ["repo-architecture-explainer"],
+  "skills": ["brainstorming", "conventions", "monorepo", "repo-state-verification"],
+  "notes": "Read-only repository architecture explainer."
+}

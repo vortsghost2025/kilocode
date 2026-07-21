@@ -1,0 +1,20 @@
+{
+  "id": "frontend",
+  "roles": ["frontend"],
+  "skills": [
+    "kilo-config",
+    "conventions",
+    "monorepo",
+    "vscode-visual-regression",
+    "focused-test-validation",
+    "debug",
+    "testing",
+    "evidence-handoff",
+    "repo-state-verification",
+    "bounded-source-patch",
+    "baseline-failure-classification",
+    "capability-security-review",
+    "code-review"
+  ],
+  "notes": "UI/frontend specialist needs VS Code visual regression skill plus general dev skills. Reduces from 19 to 13."
+}

@@ -1,0 +1,13 @@
+{
+  "id": "question-answer",
+  "roles": ["ask"],
+  "skills": [
+    "kilo-config",
+    "conventions",
+    "monorepo",
+    "repo-state-verification",
+    "capability-security-review",
+    "evidence-handoff"
+  ],
+  "notes": "Read-only Q&A agent. Explanatory skills without edit-oriented ones. Reduces from 19 to 6."
+}

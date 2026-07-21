@@ -1,0 +1,13 @@
+{
+  "id": "reviewer",
+  "roles": ["reviewer"],
+  "skills": [
+    "baseline-failure-classification",
+    "capability-security-review",
+    "code-review",
+    "conventions",
+    "focused-test-validation",
+    "strict-code-review"
+  ],
+  "notes": "Scoped read-only diff sanity reviewer."
+}

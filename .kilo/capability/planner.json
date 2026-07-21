@@ -1,0 +1,14 @@
+{
+  "id": "planner",
+  "roles": ["plan"],
+  "skills": [
+    "kilo-config",
+    "planning",
+    "conventions",
+    "monorepo",
+    "repo-state-verification",
+    "evidence-handoff",
+    "capability-security-review"
+  ],
+  "notes": "Plan mode disallows all edit tools. Includes the planning skill. Reduces from 19 to 7."
+}

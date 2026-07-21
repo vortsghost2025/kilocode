@@ -1,0 +1,15 @@
+{
+  "id": "general-purpose",
+  "roles": ["general"],
+  "skills": [
+    "kilo-config",
+    "conventions",
+    "monorepo",
+    "repo-state-verification",
+    "evidence-handoff",
+    "capability-security-review",
+    "focused-test-validation",
+    "mcp-isolation"
+  ],
+  "notes": "Research and multi-step agent. Navigation, security, test skills. Reduces from 19 to 7."
+}

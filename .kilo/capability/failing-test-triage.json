@@ -1,0 +1,6 @@
+{
+  "id": "failing-test-triage",
+  "roles": ["failing-test-triage"],
+  "skills": ["baseline-failure-classification", "debug", "focused-test-validation", "testing"],
+  "notes": "Read-only test failure diagnosis agent."
+}

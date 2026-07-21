@@ -1,0 +1,17 @@
+{
+  "id": "orchestrator",
+  "roles": ["orchestrator"],
+  "skills": [
+    "brainstorming",
+    "capability-security-review",
+    "conventions",
+    "evidence-handoff",
+    "monorepo",
+    "orchestrator-delegation",
+    "planning",
+    "provider-model-routing",
+    "repo-state-verification",
+    "strict-code-review"
+  ],
+  "notes": "Orchestrator coordinates complex tasks with planning-first delegation."
+}

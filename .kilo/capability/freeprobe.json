@@ -1,0 +1,6 @@
+{
+  "id": "freeprobe",
+  "roles": ["freeprobe"],
+  "skills": ["capability-security-review", "mcp-isolation", "provider-model-routing", "repo-state-verification"],
+  "notes": "Temporary OpenRouter free-router probe agent."
+}

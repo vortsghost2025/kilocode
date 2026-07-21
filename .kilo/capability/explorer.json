@@ -1,0 +1,6 @@
+{
+  "id": "explorer",
+  "roles": ["explore"],
+  "skills": ["monorepo", "repo-state-verification", "conventions", "capability-security-review"],
+  "notes": "Fast codebase exploration. Navigation and security skills only. Reduces from 19 to 4."
+}
