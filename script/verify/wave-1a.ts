@@ -59,7 +59,10 @@ export function classifyTypecheck(input: { exitCode: number; output: string; exp
     .map((item) => item.line)
   const missing = expected.filter((item) => !diagnostics.includes(item))
   const unexpected = diagnostics.filter((item) => !expected.includes(item))
-  const pass = input.exitCode !== 0 && banners.length === 1 && unrelated.length === 0 && same(diagnostics, expected)
+  const clean = expected.length === 0
+  const pass = clean
+    ? input.exitCode === 0 && banners.length === 1 && diagnostics.length === 0 && unrelated.length === 0
+    : input.exitCode !== 0 && banners.length === 1 && unrelated.length === 0 && same(diagnostics, expected)
   return { pass, diagnostics, missing, unexpected, unrelated }
 }
 

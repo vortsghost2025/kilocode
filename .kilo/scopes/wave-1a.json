@@ -14,11 +14,7 @@
   },
   "typecheck": {
     "command": "cd packages/opencode && bun run typecheck",
-    "acceptedBaseline": [
-      "src/storage/db.node.ts(1,30)",
-      "test/tool/remember.test.ts(49,32)",
-      "test/tool/remember.test.ts(149,32)"
-    ]
+    "acceptedBaseline": []
   },
   "testMatrix": [
     "test/kilocode/capability/kernel.test.ts",

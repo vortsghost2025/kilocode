@@ -1,0 +1,13 @@
+{
+  "id": "capability-bundles",
+  "defaultMode": "index",
+  "paths": [
+    ".kilo/scopes/capability-bundles.json",
+    ".kilo/scopes/wave-1a.json",
+    "SYSTEM_INDEX.md",
+    "packages/opencode/test/verify/manifest.test.ts",
+    "script/verify/lib/manifest.ts",
+    "script/verify/wave-1a.ts",
+    "system-manifest.json"
+  ]
+}

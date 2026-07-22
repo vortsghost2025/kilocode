@@ -86,6 +86,7 @@ export const RootManifestSchema = z
       .object({
         "wave-1a": z.literal(".kilo/scopes/wave-1a.json"),
         "system-map-v1": z.literal(".kilo/scopes/system-map-v1.json"),
+        "capability-bundles": z.literal(".kilo/scopes/capability-bundles.json"),
       })
       .strict(),
     protectedPaths: z.literal(".kilo/protected-paths.json"),

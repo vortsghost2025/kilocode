@@ -1,11 +1,13 @@
 // kilocode_change - new file
 import { describe, expect, test } from "bun:test"
+import { mkdirSync } from "node:fs"
 import path from "node:path"
 import {
   ProtectedPathsSchema,
   RootManifestSchema,
   ScopeManifestSchema,
   loadRootManifest,
+  loadScopeManifest,
   normalizePath,
   sha256File,
 } from "../../../../script/verify/lib/manifest"
@@ -30,6 +32,7 @@ function root() {
     scopes: {
       "wave-1a": ".kilo/scopes/wave-1a.json",
       "system-map-v1": ".kilo/scopes/system-map-v1.json",
+      "capability-bundles": ".kilo/scopes/capability-bundles.json",
     },
     protectedPaths: ".kilo/protected-paths.json",
     formatter: { name: "prettier", version: "3.6.2" },
@@ -164,6 +167,30 @@ describe("scope manifest", () => {
   })
 })
 
+describe("capability-bundles scope registration", () => {
+  test("root manifest accepts capability-bundles scope", () => {
+    expect(RootManifestSchema.safeParse(root()).success).toBe(true)
+  })
+
+  test("root manifest scope resolves capability-bundles path", () => {
+    const manifest = root()
+    expect(manifest.scopes["capability-bundles"]).toBe(".kilo/scopes/capability-bundles.json")
+  })
+
+  test("rejects unknown scope id via loadScopeManifest", async () => {
+    await using tmp = await tmpdir()
+    await writeRoot(tmp.path)
+    mkdirSync(path.join(tmp.path, ".kilo", "scopes"), { recursive: true })
+    await Bun.write(
+      path.join(tmp.path, ".kilo", "scopes", "capability-bundles.json"),
+      JSON.stringify({ id: "capability-bundles", defaultMode: "index", paths: ["a.ts"] }),
+    )
+    await Bun.write(path.join(tmp.path, ".kilo", "protected-paths.json"), JSON.stringify({ exact: [], prefix: [] }))
+    // Unknown scope must throw, not silently return null.
+    expect(() => loadScopeManifest("nonexistent-scope", tmp.path)).toThrow("unknown scope id")
+  })
+})
+
 describe("typecheck classification", () => {
   const expected = ["src/a.ts(1,2)", "test/b.ts(3,4)", "test/b.ts(5,6)"]
   const diagnostics = [
@@ -177,6 +204,11 @@ describe("typecheck classification", () => {
     expect(classifyTypecheck({ exitCode: 1, output, expected }).pass).toBe(true)
   })
 
+  test("rejects missing expected diagnostics with nonzero exit", () => {
+    const oneDiagnostic = ["$ tsgo --noEmit", diagnostics[0]].join("\n")
+    expect(classifyTypecheck({ exitCode: 1, output: oneDiagnostic, expected }).pass).toBe(false)
+  })
+
   test("rejects one extra TypeScript diagnostic", () => {
     const extra = `${output}\nother.ts(7,8): error TS4000: extra`
     expect(classifyTypecheck({ exitCode: 1, output: extra, expected }).pass).toBe(false)
@@ -186,8 +218,21 @@ describe("typecheck classification", () => {
     expect(classifyTypecheck({ exitCode: 1, output: `${output}\nfatal: crashed`, expected }).pass).toBe(false)
   })
 
-  test("rejects no diagnostics with zero exit", () => {
-    expect(classifyTypecheck({ exitCode: 0, output: "$ tsgo --noEmit", expected }).pass).toBe(false)
+  test("accepts clean typecheck with empty baseline", () => {
+    expect(classifyTypecheck({ exitCode: 0, output: "$ tsgo --noEmit", expected: [] }).pass).toBe(true)
+  })
+
+  test("rejects unexpected diagnostic against empty baseline", () => {
+    const extra = ["$ tsgo --noEmit", "other.ts(7,8): error TS4000: extra"].join("\n")
+    expect(classifyTypecheck({ exitCode: 0, output: extra, expected: [] }).pass).toBe(false)
+  })
+
+  test("rejects nonzero exit with empty baseline and no diagnostics", () => {
+    expect(classifyTypecheck({ exitCode: 1, output: "$ tsgo --noEmit", expected: [] }).pass).toBe(false)
+  })
+
+  test("rejects unrelated output against empty baseline", () => {
+    expect(classifyTypecheck({ exitCode: 0, output: "$ tsgo --noEmit\nfatal: crashed", expected: [] }).pass).toBe(false)
   })
 
   test("rejects command failure without diagnostics", () => {
