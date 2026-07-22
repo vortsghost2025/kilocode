@@ -54,6 +54,7 @@
     "@types/bun": "catalog:",
     "@types/cross-spawn": "6.0.6",
     "@types/mime-types": "3.0.1",
+    "@types/node": "catalog:",
     "@types/semver": "^7.5.8",
     "@types/turndown": "5.0.5",
     "@types/which": "3.0.4",
