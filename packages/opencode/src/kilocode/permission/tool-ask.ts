@@ -2,12 +2,15 @@
 import { Permission } from "@/permission"
 import { MessageID, SessionID } from "@/session/schema"
 import { DelegatedEdit } from "@/kilocode/delegated-edit"
+import { CapabilityAuthority } from "@/kilocode/capability/authority"
+import { OwnershipAudit } from "./ownership-audit"
 
 export namespace ToolAsk {
   export function build(input: {
     sessionID: SessionID
     messageID: MessageID
     callID: string
+    agentID?: string
     operation?: string
     role?: Permission.Ruleset
     agent: Permission.Ruleset
@@ -17,6 +20,11 @@ export namespace ToolAsk {
   } {
     return {
       async ask(req) {
+        const correlationID = Permission.correlation({
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          callID: input.callID,
+        })
         const evidence =
           req.metadata && typeof req.metadata.evidenceRecall === "object" && req.metadata.evidenceRecall !== null
             ? (req.metadata.evidenceRecall as DelegatedEdit.EvidenceRecall)
@@ -30,7 +38,12 @@ export namespace ToolAsk {
             session: input.session,
             evidence,
           })
-          if (delegated) return
+          if (delegated) {
+            for (const pattern of req.patterns) {
+              Permission.trace(CapabilityAuthority.delegated({ permission: req.permission, pattern, correlationID }))
+            }
+            return
+          }
         } catch (err) {
           // Lease exhaustion must propagate so the error message reaches the
           // tool part and the test can assert the deterministic message.
@@ -43,6 +56,14 @@ export namespace ToolAsk {
           // The consumed flag was not touched (evidence check happens before
           // consumption), so the grant can be consumed on a subsequent retry.
           throw new Permission.DeniedError({ ruleset: input.session })
+        }
+        if (input.agentID) {
+          await OwnershipAudit.record({
+            role: input.agentID,
+            sessionID: input.sessionID,
+            permission: req.permission,
+            patterns: req.patterns,
+          })
         }
         await Permission.ask(
           {

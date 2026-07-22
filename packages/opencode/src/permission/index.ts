@@ -12,6 +12,7 @@ import { Log } from "@/util/log"
 import { Wildcard } from "@/util/wildcard"
 import { Deferred, Effect, Layer, Schema, ServiceMap } from "effect"
 import os from "os"
+import { createHash } from "node:crypto" // kilocode_change
 import z from "zod"
 import { evaluate as evalRule } from "./evaluate"
 import { PermissionID } from "./schema"
@@ -159,9 +160,34 @@ export namespace Permission {
     session: Record<string, Ruleset> // kilocode_change
   }
 
+  // kilocode_change start — permission diagnostics never log raw patterns or identifiers
+  function hash(value: string) {
+    return createHash("sha256").update(value).digest("hex").slice(0, 16)
+  }
+
+  export function correlation(input: { sessionID: SessionID; messageID?: MessageID; callID?: string }) {
+    return hash([input.sessionID, input.messageID ?? "", input.callID ?? ""].join("\0"))
+  }
+
+  export function trace(decision: CapabilityAuthority.Decision) {
+    const sourceSessionID = "sourceSessionID" in decision.source ? decision.source.sourceSessionID : undefined
+    const kind = "kind" in decision.source ? decision.source.kind : undefined
+    log.info("decision", {
+      permission: decision.requestedPermission,
+      action: decision.action,
+      winningPatternHash: hash(decision.winningPattern),
+      source: decision.source.layer,
+      sourceKind: kind,
+      sourceSessionIDHash: sourceSessionID ? hash(sourceSessionID) : undefined,
+      correlationID: decision.correlationID,
+    })
+  }
+  // kilocode_change end
+
   export function evaluate(permission: string, pattern: string, ...rulesets: Ruleset[]): Rule {
-    log.info("evaluate", { permission, pattern, ruleset: rulesets.flat() })
-    return evalRule(permission, pattern, ...rulesets)
+    const rule = evalRule(permission, pattern, ...rulesets)
+    log.info("evaluate", { permission, action: rule.action, patternHash: hash(pattern) }) // kilocode_change
+    return rule
   }
 
   export class Service extends ServiceMap.Service<Service, Interface>()("@opencode/Permission") {}
@@ -200,6 +226,11 @@ export namespace Permission {
         // kilocode_change end
         const s = yield* InstanceState.get(state) // kilocode_change
         const local = s.session[request.sessionID] ?? [] // kilocode_change
+        const correlationID = correlation({
+          sessionID: request.sessionID,
+          messageID: request.tool?.messageID,
+          callID: request.tool?.callID,
+        }) // kilocode_change
         let needsAsk = false
 
         // kilocode_change start — force "ask" for config file edits
@@ -217,9 +248,10 @@ export namespace Permission {
             session: narrow,
             sessionID: request.sessionID,
             approved: Permission.merge(approved, local),
+            correlationID,
           })
           // kilocode_change end
-          log.info("evaluated", { permission: request.permission, pattern, action: rule })
+          trace(rule) // kilocode_change
           if (rule.action === "deny") {
             return yield* new DeniedError({
               ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
@@ -244,7 +276,11 @@ export namespace Permission {
           },
         }
         // kilocode_change end
-        log.info("asking", { id, permission: info.permission, patterns: info.patterns })
+        log.info("asking", {
+          permission: info.permission,
+          patternHashes: info.patterns.map(hash),
+          correlationID,
+        }) // kilocode_change
 
         const deferred = yield* Deferred.make<void, RejectedError | CorrectedError>()
         s.pending.set(id, { info, ruleset, role, narrow, deferred }) // kilocode_change — store authority layers

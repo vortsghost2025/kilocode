@@ -531,6 +531,7 @@ export namespace SessionPrompt {
             sessionID,
             messageID: assistantMessage.id,
             callID: part.callID,
+            agentID: callerAgent?.name ?? "unknown",
             role: callerRole,
             agent: callerAgent?.permission ?? [],
             session: session.permission ?? [],
@@ -925,6 +926,7 @@ export namespace SessionPrompt {
         sessionID: input.session.id,
         messageID: input.processor.message.id,
         callID: options.toolCallId,
+        agentID: input.agent.name,
         operation: op, // kilocode_change
         role,
         agent: input.agent.permission,
