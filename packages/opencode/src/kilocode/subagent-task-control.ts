@@ -85,7 +85,6 @@ export namespace SubagentTaskControl {
     result: TerminalResult | undefined
     retainUntil: number | undefined
     slots: { startup: unknown | undefined; execution: unknown | undefined; cleanup: unknown | undefined }
-    leaseID: string | undefined
   }
 
   interface State {
@@ -227,7 +226,6 @@ export namespace SubagentTaskControl {
       result: undefined,
       retainUntil: input.retainUntil,
       slots: { startup: undefined, execution: undefined, cleanup: undefined },
-      leaseID: undefined,
     }
     current.entries.set(taskID, next)
     const handle = Object.freeze({}) as Handle
