@@ -19,6 +19,7 @@ import { peel, resolve } from "../kilocode/shell-route" // kilocode_change
 
 import { BashArity } from "@/permission/arity"
 import { BashHierarchy } from "@/kilocode/bash-hierarchy" // kilocode_change
+import { OwnershipAudit, OwnershipPolicy } from "@/kilocode/permission/ownership-audit" // kilocode_change
 import { Truncate } from "./truncate"
 import { Plugin } from "@/plugin"
 
@@ -108,6 +109,7 @@ export const BashTool = Tool.define("bash", async () => {
       const patterns = new Set<string>()
       const always = new Set<string>()
       const rules = new Set<string>() // kilocode_change — hierarchy rules for permissions "npm", "npm install", "npm install lodash"
+      const commands: string[][] = [] // kilocode_change
 
       // kilocode_change start - only parse bash/default commands with tree-sitter
       if (route === undefined || route === "bash") {
@@ -136,6 +138,7 @@ export const BashTool = Tool.define("bash", async () => {
             }
             command.push(child.text)
           }
+          if (command.length) commands.push(command) // kilocode_change
 
           // not an exhaustive list, but covers most common cases
           if (["cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat"].includes(command[0])) {
@@ -164,8 +167,23 @@ export const BashTool = Tool.define("bash", async () => {
       } else if (cmd) {
         // kilocode_change - explicit ps/cmd routes require exact command approval, no hierarchy auto-allow
         patterns.add(cmd)
+        commands.push(...OwnershipPolicy.parse(cmd)) // kilocode_change
       }
       // kilocode_change end
+
+      // kilocode_change start - Phase 2A ownership audit
+      const result = await OwnershipPolicy.evaluate({
+        role: ctx.agent,
+        permission: "bash",
+        commands,
+        strict: OwnershipPolicy.enabled(),
+      })
+      if (result.status === "denied_wrong_owner") {
+        void OwnershipAudit.recordDenied({ role: ctx.agent, sessionID: ctx.sessionID, permission: "bash" })
+        throw new OwnershipPolicy.DeniedError({ operation: "git-mutation", expectedOwner: "git-ops" })
+      }
+      // kilocode_change end
+
       if (directories.size > 0) {
         const globs = Array.from(directories).map((dir) => {
           // Preserve POSIX-looking paths with /s, even on Windows
