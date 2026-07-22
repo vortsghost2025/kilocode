@@ -1,5 +1,5 @@
 import path from "path"
-import { lstatSync } from "fs"
+import { lstatSync, realpathSync } from "fs" // kilocode_change — Phase 2B: shared canonical resolver
 import z from "zod"
 import { Permission } from "@/permission"
 import { Instance } from "@/project/instance"
@@ -118,6 +118,12 @@ export namespace DelegatedEdit {
     if (!lexical || path.isAbsolute(lexical) || lexical === ".." || lexical.startsWith(`..${path.sep}`)) {
       fail("path must resolve to one file inside the current worktree")
     }
+
+    const res = canonicalTarget(input.path)
+    if (res.kind === "external" || res.kind === "unknown") {
+      fail("target must remain physically inside the current project")
+    }
+
     const stat = (() => {
       try {
         return lstatSync(target)
@@ -128,25 +134,12 @@ export namespace DelegatedEdit {
         throw err
       }
     })()
+
     if (stat.isSymbolicLink()) fail("target must not be a symbolic link")
     if (!stat.isFile()) fail("target must be a regular file")
-
-    const physical = Filesystem.resolve(target)
-    const dir = Filesystem.resolve(Instance.directory)
-    const roots = root === path.parse(root).root ? [dir] : [dir, root]
-    const inside = roots.some((base) => {
-      const relative = path.relative(base, physical)
-      return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`)
-    })
-    if (!inside) fail("target must remain physically inside the current project")
-
-    const relative = path.relative(root, physical)
-    if (!relative || path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
-      fail("target must resolve to one file inside the current worktree")
-    }
     if (input.operation === "populate" && stat.size !== 0) fail("populate requires an existing empty file")
     if (input.operation === "edit" && stat.size === 0) fail("empty files require the populate operation", "populate")
-    return Object.freeze({ operation: input.operation, path: relative })
+    return Object.freeze({ operation: input.operation, path: res.relative })
   }
 
   export function rules(lease: Lease): Permission.Ruleset {
@@ -300,4 +293,104 @@ export namespace DelegatedEdit {
       consumed: grant.consumed,
     })
   }
+
+  // kilocode_change start — Phase 2B: shared canonical-target resolver
+  export type CanonicalKind = "external" | "planning" | "project" | "unknown"
+
+  export interface CanonicalTarget {
+    canonical: string
+    relative: string
+    kind: CanonicalKind
+  }
+
+  const isInside = (roots: string[], candidate: string): boolean =>
+    roots.some((base) => {
+      const rel = path.relative(base, candidate)
+      return !path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`)
+    })
+
+  const classifyRelative = (relToRoot: string): CanonicalKind => {
+    if (!relToRoot || path.isAbsolute(relToRoot) || relToRoot === ".." || relToRoot.startsWith(`..${path.sep}`)) {
+      return "unknown"
+    }
+    const parts = normalize(relToRoot).split(path.sep)
+    if (parts[0] === ".planning") return "planning"
+    return "project"
+  }
+
+  const isEnoentLike = (err: unknown): boolean => {
+    if (typeof err !== "object" || err === null) return false
+    const code = (err as { code?: string }).code
+    return code === "ENOENT" || code === "ENOTDIR"
+  }
+
+  export function canonicalTarget(raw: string): CanonicalTarget {
+    const root = Filesystem.resolve(Instance.worktree)
+    const dir = Filesystem.resolve(Instance.directory)
+    const candidate = path.isAbsolute(raw)
+      ? path.resolve(Filesystem.windowsPath(raw))
+      : path.resolve(root, Filesystem.windowsPath(raw))
+    const roots = root === path.parse(root).root ? [dir] : [dir, root]
+
+    // Try resolving the exact target via realpath — works for existing files/dirs
+    try {
+      const physical = Filesystem.normalizePath(realpathSync.native(candidate))
+      if (!isInside(roots, physical)) {
+        return { canonical: physical, relative: path.relative(root, physical), kind: "external" }
+      }
+      const relToRoot = path.relative(root, physical)
+      return { canonical: physical, relative: relToRoot, kind: classifyRelative(relToRoot) }
+    } catch (err) {
+      // kilocode_change — Phase 2B: fail-closed canonicalization
+      // Only continue ancestor resolution for nonexistent targets.
+      // EACCES, ELOOP, EPERM, malformed paths, and unexpected errors fail closed.
+      if (!isEnoentLike(err)) {
+        return { canonical: candidate, relative: path.relative(root, candidate), kind: "unknown" }
+      }
+    }
+
+    let current = candidate
+    const segments: string[] = []
+    const rootDir = path.parse(root).root
+    while (current !== rootDir && current !== path.dirname(current)) {
+      try {
+        const stat = lstatSync(current)
+        if (stat.isSymbolicLink()) {
+          const resolved = Filesystem.normalizePath(realpathSync.native(current))
+          if (!isInside(roots, resolved)) {
+            return { canonical: resolved, relative: path.relative(root, resolved), kind: "external" }
+          }
+          const joined = segments.length > 0 ? path.join(resolved, ...segments.reverse()) : resolved
+          const physical = Filesystem.normalizePath(joined)
+          if (!isInside(roots, physical)) {
+            return { canonical: physical, relative: path.relative(root, physical), kind: "external" }
+          }
+          const relToRoot = path.relative(root, physical)
+          return { canonical: physical, relative: relToRoot, kind: classifyRelative(relToRoot) }
+        }
+        const physical = Filesystem.normalizePath(realpathSync.native(current))
+        const joined = segments.length > 0 ? path.join(physical, ...segments.reverse()) : physical
+        if (!isInside(roots, joined)) {
+          return { canonical: joined, relative: path.relative(root, joined), kind: "external" }
+        }
+        const relToRoot = path.relative(root, joined)
+        if (!relToRoot || path.isAbsolute(relToRoot) || relToRoot === ".." || relToRoot.startsWith(`..${path.sep}`)) {
+          return { canonical: joined, relative: relToRoot, kind: "unknown" }
+        }
+        return { canonical: joined, relative: relToRoot, kind: classifyRelative(relToRoot) }
+      } catch (err) {
+        // kilocode_change — Phase 2B: fail-closed canonicalization
+        // Only walk up for nonexistent ancestors.
+        // Permission, loop, or unexpected errors fail closed.
+        if (!isEnoentLike(err)) {
+          return { canonical: candidate, relative: path.relative(root, candidate), kind: "unknown" }
+        }
+        segments.push(path.basename(current))
+        current = path.dirname(current)
+      }
+    }
+
+    return { canonical: candidate, relative: path.relative(root, candidate), kind: "unknown" }
+  }
+  // kilocode_change end
 }

@@ -3,7 +3,7 @@ import { Permission } from "@/permission"
 import { MessageID, SessionID } from "@/session/schema"
 import { DelegatedEdit } from "@/kilocode/delegated-edit"
 import { CapabilityAuthority } from "@/kilocode/capability/authority"
-import { OwnershipAudit } from "./ownership-audit"
+import { OwnershipAudit, SourceOwnership } from "./ownership-audit" // kilocode_change — Phase 2B
 
 export namespace ToolAsk {
   export function build(input: {
@@ -57,6 +57,45 @@ export namespace ToolAsk {
           // consumption), so the grant can be consumed on a subsequent retry.
           throw new Permission.DeniedError({ ruleset: input.session })
         }
+        // kilocode_change start — Phase 2B: source-mutation ownership enforcement
+        // Applies only on the non-delegated fallthrough (DelegatedEdit.authorize
+        // returned false), before ordinary Permission.ask. A valid delegated
+        // lease already returned above and consumed exactly once.
+        if (SourceOwnership.enabled() && req.permission === "edit") {
+          const result = SourceOwnership.evaluate({
+            role: input.agentID ?? "unknown",
+            permission: req.permission,
+            patterns: req.patterns,
+            strict: true,
+          })
+          if (result.status === "denied_wrong_owner") {
+            SourceOwnership.recordDenied({
+              role: input.agentID ?? "unknown",
+              sessionID: input.sessionID,
+              permission: req.permission,
+              patterns: req.patterns,
+              reason: "wrong_owner",
+            }).catch(() => {})
+            throw new SourceOwnership.DeniedError({
+              expectedOwner: "phase2f-implementer",
+              reason: "wrong_owner",
+            })
+          }
+          if (result.status === "denied_missing_authorization") {
+            SourceOwnership.recordDenied({
+              role: input.agentID ?? "unknown",
+              sessionID: input.sessionID,
+              permission: req.permission,
+              patterns: req.patterns,
+              reason: "missing_authorization",
+            }).catch(() => {})
+            throw new SourceOwnership.DeniedError({
+              expectedOwner: "phase2f-implementer",
+              reason: "missing_authorization",
+            })
+          }
+        }
+        // kilocode_change end
         if (input.agentID) {
           await OwnershipAudit.record({
             role: input.agentID,

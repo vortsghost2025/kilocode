@@ -175,7 +175,18 @@ export const ApplyPatchTool = Tool.define("apply_patch", {
     }))
 
     // Check permissions if needed
-    const relativePaths = fileChanges.map((c) => path.relative(Instance.worktree, c.filePath).replaceAll("\\", "/"))
+    // kilocode_change — Phase 2B: include move destinations in preflight
+    const relativePaths = Array.from(
+      new Set(
+        fileChanges.flatMap((c) => {
+          const paths = [path.relative(Instance.worktree, c.filePath).replaceAll("\\", "/")]
+          if (c.movePath) {
+            paths.push(path.relative(Instance.worktree, c.movePath).replaceAll("\\", "/"))
+          }
+          return paths
+        }),
+      ),
+    )
     await ctx.ask({
       permission: "edit",
       patterns: relativePaths,

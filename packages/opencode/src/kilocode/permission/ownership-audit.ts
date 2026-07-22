@@ -7,6 +7,8 @@ import { Log } from "@/util/log"
 import { NamedError } from "@opencode-ai/util/error"
 import { createHash } from "node:crypto"
 import z from "zod"
+import path from "path"
+import { DelegatedEdit } from "@/kilocode/delegated-edit" // kilocode_change — Phase 2B: shared canonical resolver
 
 export namespace OwnershipPolicy {
   export function enabled() {
@@ -414,6 +416,8 @@ export namespace OwnershipAudit {
       role: z.string(),
       expectedOwner: z.enum(["phase2f-implementer", "git-ops", "package-ops"]),
       permission: z.string(),
+      reason: z.string().optional(),
+      targetPatternsHash: z.string().optional(),
       sessionCorrelationID: z.string(),
       repositoryRootHash: z.string(),
     })
@@ -490,3 +494,87 @@ export namespace OwnershipAudit {
       .catch(() => undefined)
   }
 }
+
+// kilocode_change start — Phase 2B: source-mutation ownership enforcement
+export namespace SourceOwnership {
+  export function enabled() {
+    return ["1", "true"].includes((process.env.KILO_EXPERIMENTAL_SOURCE_OWNERSHIP_ENFORCEMENT ?? "").toLowerCase())
+  }
+
+  export type Classification = { kind: "external" } | { kind: "planning" } | { kind: "project" } | { kind: "unknown" }
+
+  export type Result =
+    | { status: "not_applicable" }
+    | { status: "denied_wrong_owner"; expectedOwner: "phase2f-implementer" }
+    | { status: "denied_missing_authorization"; expectedOwner: "phase2f-implementer" }
+
+  export const DeniedError = NamedError.create(
+    "SourceOwnershipDeniedError",
+    z.object({
+      expectedOwner: z.literal("phase2f-implementer"),
+      reason: z.enum(["wrong_owner", "missing_authorization"]),
+    }),
+  )
+
+  export function classify(patterns: string[]): Classification[] {
+    return patterns.map((raw) => {
+      const target = DelegatedEdit.canonicalTarget(raw)
+      return { kind: target.kind }
+    })
+  }
+
+  export function evaluate(input: { role: string; permission: string; patterns: string[]; strict: boolean }): Result {
+    if (!input.strict || input.permission !== "edit") return { status: "not_applicable" }
+
+    const classifications = classify(input.patterns)
+
+    if (classifications.some((c) => c.kind === "unknown")) {
+      return { status: "denied_wrong_owner", expectedOwner: "phase2f-implementer" }
+    }
+
+    const hasProject = classifications.some((c) => c.kind === "project")
+    if (!hasProject) {
+      // Every target is planning and/or external — no protected path
+      return { status: "not_applicable" }
+    }
+
+    if (input.role === "phase2f-implementer") {
+      return { status: "denied_missing_authorization", expectedOwner: "phase2f-implementer" }
+    }
+
+    return { status: "denied_wrong_owner", expectedOwner: "phase2f-implementer" }
+  }
+
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 16)
+  const role = (value: string) => (/^[a-zA-Z0-9_-]{1,64}$/.test(value) ? value : "custom")
+
+  export async function recordDenied(input: {
+    role: string
+    sessionID: SessionID
+    permission: string
+    patterns: string[]
+    reason: string
+  }): Promise<void> {
+    return Promise.resolve()
+      .then(() => {
+        const canonical = input.patterns.map((p) => DelegatedEdit.canonicalTarget(p).canonical).sort()
+        const aggregate = canonical.join("\0")
+        return OwnershipAudit.Info.parse({
+          operation: "source-mutation",
+          role: role(input.role),
+          expectedOwner: "phase2f-implementer",
+          permission: input.permission,
+          reason: input.reason,
+          targetPatternsHash: hash(aggregate),
+          sessionCorrelationID: hash(input.sessionID),
+          repositoryRootHash: hash(Instance.worktree),
+        })
+      })
+      .then(async (info) => {
+        Log.create({ service: "ownership-audit" }).info("source-denied", info)
+        await Bus.publish(OwnershipAudit.Event.Observed, info)
+      })
+      .catch(() => undefined)
+  }
+}
+// kilocode_change end
