@@ -37,7 +37,7 @@ const ambiguous = [
 ]
 
 const instructionTools = ["invalid", "question"]
-const readTools = ["read", "glob", "grep", "skill", "kilo_local_recall"]
+const readTools = ["read", "glob", "grep", "skill", "kilo_local_recall", "semantic_search"]
 const remoteTools = ["webfetch", "websearch", "codesearch"]
 const writeTools = ["bash", "edit", "write", "apply_patch", "todowrite", "kilo_local_remember", "plan_exit", "lsp"]
 const uploadTools = ["codebase_search"]
