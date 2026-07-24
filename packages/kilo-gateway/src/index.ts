@@ -53,6 +53,8 @@ export { createKiloRoutes } from "./server/routes.js"
 // For TUI components and commands, import from "@kilocode/kilo-gateway/tui"
 // This avoids circular dependencies with opencode TUI infrastructure
 
+export { resolveKiloGatewayBaseUrl, resolveKiloOpenRouterBaseUrl } from "./api/url.js"
+
 // ============================================================================
 // Types
 // ============================================================================

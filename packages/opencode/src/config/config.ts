@@ -23,6 +23,7 @@ import {
   printParseErrorCode,
 } from "jsonc-parser"
 import { KilocodeConfig } from "../kilocode/config/config"
+import { IndexingConfig } from "@kilocode/kilo-indexing/config"
 // kilocode_change end
 import { Instance, type InstanceContext } from "../project/instance"
 import { LSPServer } from "../lsp/server"
@@ -1185,6 +1186,7 @@ export namespace Config {
             .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
         })
         .optional(),
+      indexing: IndexingConfig.optional().describe("Codebase indexing configuration"),
     })
     .strict()
     .meta({

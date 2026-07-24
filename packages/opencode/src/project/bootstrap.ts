@@ -12,11 +12,13 @@ import { Instance } from "./instance"
 import { Log } from "@/util/log"
 import { KiloSessions } from "@/kilo-sessions/kilo-sessions" // kilocode_change
 // import { ShareNext } from "@/share/share-next" // kilocode_change
+import { KiloIndexing } from "@/kilocode/indexing" // kilocode_change
 
 export async function InstanceBootstrap() {
   Log.Default.info("bootstrapping", { directory: Instance.directory })
   await Plugin.init()
   KiloSessions.init() // kilocode_change
+  KiloIndexing.init().catch((err) => Log.Default.warn("indexing init failed", { err })) // kilocode_change
   Format.init()
   await LSP.init()
   File.init()

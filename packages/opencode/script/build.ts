@@ -14,6 +14,7 @@ process.chdir(dir)
 
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
+import { LanceDBRuntime } from "../src/kilocode/lancedb"
 
 const modelsUrl = process.env.KILO_MODELS_URL || "https://models.dev"
 // Fetch and generate models.dev snapshot
@@ -208,6 +209,7 @@ for (const item of targets) {
   const rootPath = path.resolve(dir, "../../node_modules/@opentui/core/parser.worker.js")
   const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : rootPath)
   const workerPath = "./src/cli/cmd/tui/worker.ts"
+  const indexingWorkerPath = "./src/kilocode/indexing-worker.ts"
 
   // Use platform-specific bunfs root path based on target OS
   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
@@ -217,6 +219,7 @@ for (const item of targets) {
     conditions: ["browser"],
     tsconfig: "./tsconfig.json",
     plugins: [plugin],
+    external: ["node-gyp", ...LanceDBRuntime.external],
     compile: {
       autoloadBunfig: false,
       autoloadDotenv: false,
@@ -230,12 +233,19 @@ for (const item of targets) {
     files: {
       ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
     },
-    entrypoints: ["./src/index.ts", parserWorker, workerPath, ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : [])],
+    entrypoints: [
+      "./src/index.ts",
+      parserWorker,
+      workerPath,
+      indexingWorkerPath,
+      ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
+    ],
     define: {
       KILO_VERSION: `'${Script.version}'`,
       KILO_MIGRATIONS: JSON.stringify(migrations),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
       KILO_WORKER_PATH: workerPath,
+      KILO_INDEXING_WORKER_PATH: indexingWorkerPath,
       KILO_CHANNEL: `'${Script.channel}'`,
       KILO_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
     },
@@ -276,7 +286,31 @@ for (const item of targets) {
   }
 
   await $`rm -rf ./dist/${name}/bin/tui`
-  await Bun.file(`dist/${name}/package.json`).write(
+
+  // Install external LanceDB packages into the artifact package root for runtime resolution.
+  // Must write a package.json first so bun treats the directory as a standalone project
+  // rather than resolving into the monorepo workspace.
+  const rootDir = `dist/${name}`
+  await Bun.file(`${rootDir}/package.json`).write(JSON.stringify({ name, private: true }))
+  await $`bun install --cwd ${rootDir} @lancedb/lancedb@0.26.2 --os=${item.os} --cpu=${item.arch}`
+  const pkgDir = `${rootDir}/node_modules/@lancedb/lancedb`
+  const pkgJson = await Bun.file(`${pkgDir}/package.json`)
+    .json()
+    .catch(() => null)
+  if (!pkgJson) {
+    console.error(`LanceDB package not found at ${pkgDir} — build failed`)
+    process.exit(1)
+  }
+  const nativeName = `@lancedb/lancedb-${item.os}-${item.arch}-msvc`
+  const nativeDir = `${rootDir}/node_modules/${nativeName}`
+  const nativeOk = await Bun.file(`${nativeDir}/package.json`)
+    .exists()
+    .catch(() => false)
+  if (nativeOk) console.log(`  native package: ${nativeDir}`)
+  else console.warn(`  native package not found: ${nativeName} (may resolve from cache)`)
+  console.log(`  lancedb js entry: ${pkgDir}/dist/index.js`)
+
+  await Bun.file(`${rootDir}/package.json`).write(
     JSON.stringify(
       {
         name,
