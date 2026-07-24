@@ -60,6 +60,7 @@ import { writeHeapSnapshot } from "v8"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
 import { registerKiloCommands } from "@/kilocode/kilo-commands" // kilocode_change
 import { KiloClawView } from "@/kilocode/claw/view" // kilocode_change
+import { UserTerminal } from "@/kilocode/user-terminal/launch" // kilocode_change
 import { initializeTUIDependencies } from "@kilocode/kilo-gateway/tui" // kilocode_change
 import { TuiConfigProvider, useTuiConfig } from "./context/tui-config"
 import { TuiConfig } from "@/config/tui"
@@ -716,6 +717,45 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       },
       category: "System",
     },
+    // kilocode_change start - Local Developer Terminal launcher (Milestone B).
+    // Opens a separate, visible PowerShell 7 window/tab at the current Kilo
+    // workspace while the agent keeps running. The terminal is detached and
+    // owned by the OS (Windows Terminal / conhost), never by the agent shell.
+    // No node-pty, no embedded OpenTUI panel (that is Milestone A).
+    {
+      title: "Open local terminal",
+      value: "terminal.open",
+      slash: {
+        name: "terminal",
+      },
+      onSelect: (dialog) => {
+        const cwd = (() => {
+          const data = route.data
+          if (data.type === "session") {
+            const ses = sync.session.get(data.sessionID)
+            return ses?.directory ?? process.cwd()
+          }
+          return process.cwd()
+        })()
+        const result = UserTerminal.launch({ cwd })
+        if (result.ok) {
+          toast.show({
+            variant: "success",
+            message: `Opened local terminal at ${result.cwd}`,
+            duration: 3000,
+          })
+        } else {
+          toast.show({
+            variant: "warning",
+            message: result.message,
+            duration: 6000,
+          })
+        }
+        dialog.clear()
+      },
+      category: "System",
+    },
+    // kilocode_change end
     {
       title: "Exit the app",
       value: "app.exit",
