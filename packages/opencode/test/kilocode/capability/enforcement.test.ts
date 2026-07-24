@@ -25,7 +25,7 @@
  * Section 22:     authority ceiling invariance proofs (child narrows, resume, forgery)
  */
 
-import { test, expect, describe, afterEach, mock } from "bun:test"
+import { test, expect, describe, afterEach, mock, spyOn } from "bun:test"
 import { Permission } from "../../../src/permission"
 import { Agent } from "../../../src/agent/agent"
 import { Config } from "../../../src/config/config"
@@ -44,12 +44,16 @@ import { BackgroundTaskTool } from "../../../src/kilocode/background-task-tool"
 import { Filesystem } from "../../../src/util/filesystem"
 import { SessionPrompt } from "../../../src/session/prompt"
 import { CapabilityAuthority } from "../../../src/kilocode/capability/authority"
+import { CapabilityManifest } from "../../../src/kilocode/capability/manifest" // kilocode_change
 import { Database, eq } from "../../../src/storage/db"
 import { SessionTable } from "../../../src/session/session.sql"
 import { ProjectTable } from "../../../src/project/project.sql"
 import { ProjectID } from "../../../src/project/schema"
+import { ToolAsk } from "../../../src/kilocode/permission/tool-ask"
+import { KiloIndexing } from "../../../src/kilocode/indexing"
 
 afterEach(async () => {
+  mock.restore()
   await Instance.disposeAll()
 })
 
@@ -2458,6 +2462,143 @@ describe("Authority ceiling invariance proofs", () => {
           expect(action).toBe("deny")
         },
       })
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 23. semantic_search built-in local-read classification enforcement
+// ---------------------------------------------------------------------------
+describe("semantic_search built-in local-read enforcement", () => {
+  const blank = {
+    version: 1 as const,
+    agent: { id: "code", role: "subagent" as const },
+    identity: {
+      providerID: "openai",
+      modelID: "gpt-4",
+      credentialRef: "env:EXAMPLE",
+    },
+    skills: { allow: [], deny: [] },
+    mcp: { servers: { allow: [], deny: [] }, tools: {} },
+    plugins: { allow: [], deny: [] },
+    builtins: {} as Record<string, "allow" | "deny" | "ask">,
+    filesystem: { readRoots: ["${WORKTREE}"], writeRoots: [] },
+    shell: { action: "deny" as const, patterns: [] },
+    git: { action: "allow" as const, patterns: ["status", "diff", "log"] },
+    network: { action: "deny" as const, patterns: [] },
+    context: { maxTokens: 32_000, maxTools: 12, maxMcpTools: 3 },
+    timeoutMs: 60_000,
+    concurrency: { maxTasks: 1, distinctAgentTypes: true, allowNested: false },
+    inheritance: { mode: "restrictive" as const, categories: ["filesystem", "git", "network", "mcp"] },
+    lease: { lifetime: "task" as const, revokeOn: ["complete", "cancel", "error", "timeout"] },
+  }
+
+  test("class-1 read classification accepts semantic_search allow", () => {
+    const input = { ...blank, risk: "class-1", classification: "read" as const, builtins: { semantic_search: "allow" } }
+    expect(CapabilityManifest.parse(input).risk).toBe("class-1")
+  })
+
+  test("class-0 rejects semantic_search allow as below required class-1", () => {
+    const input = { ...blank, risk: "class-0", classification: "read" as const, builtins: { semantic_search: "allow" } }
+    expect(() => CapabilityManifest.parse(input)).toThrow("below required class-1")
+  })
+
+  test("denied semantic_search invokes ctx.ask and prevents search", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        spyOn(KiloIndexing, "ready").mockReturnValue(true)
+        const search = spyOn(KiloIndexing, "search").mockResolvedValue([])
+
+        const ruleset = Permission.fromConfig({ "*": "deny", semantic_search: "deny" })
+        const denied = {
+          ...blank,
+          risk: "class-1",
+          classification: "read" as const,
+          builtins: { semantic_search: "deny" },
+        }
+        CapabilityManifest.parse(denied)
+
+        const session = await Session.create({})
+        const messageID = MessageID.ascending()
+        const callID = "call-semantic-search-deny"
+        const builtAsk = ToolAsk.build({
+          sessionID: session.id,
+          messageID,
+          callID,
+          agentID: "code",
+          agent: ruleset,
+          session: [],
+        })
+        const ask = mock((request) => builtAsk.ask(request))
+        const ctx = {
+          sessionID: session.id,
+          messageID,
+          agent: "code",
+          abort: new AbortController().signal,
+          messages: [],
+          metadata: () => {},
+          ask,
+        }
+
+        const { SemanticSearchTool } = await import("@/kilocode/tool/semantic-search")
+        const tool = await SemanticSearchTool.init()
+        await expect(tool.execute({ query: "auth" }, ctx as never)).rejects.toBeInstanceOf(Permission.DeniedError)
+
+        expect(ask).toHaveBeenCalledTimes(1)
+        expect(search).not.toHaveBeenCalled()
+      },
+    })
+  })
+
+  test("allowed class-1 local-read authority permits exactly one search", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        spyOn(KiloIndexing, "ready").mockReturnValue(true)
+        const search = spyOn(KiloIndexing, "search").mockResolvedValue([])
+
+        const ruleset = Permission.fromConfig({ "*": "deny", semantic_search: "allow" })
+        const allowed = {
+          ...blank,
+          risk: "class-1",
+          classification: "read" as const,
+          builtins: { semantic_search: "allow" },
+        }
+        CapabilityManifest.parse(allowed)
+
+        const session = await Session.create({})
+        const messageID = MessageID.ascending()
+        const callID = "call-semantic-search-allow"
+        const builtAsk = ToolAsk.build({
+          sessionID: session.id,
+          messageID,
+          callID,
+          agentID: "code",
+          agent: ruleset,
+          session: [],
+        })
+        const ask = mock((request) => builtAsk.ask(request))
+        const ctx = {
+          sessionID: session.id,
+          messageID,
+          agent: "code",
+          abort: new AbortController().signal,
+          messages: [],
+          metadata: () => {},
+          ask,
+        }
+
+        const { SemanticSearchTool } = await import("@/kilocode/tool/semantic-search")
+        const tool = await SemanticSearchTool.init()
+        await tool.execute({ query: "session resume" }, ctx as never)
+
+        expect(ask).toHaveBeenCalledTimes(1)
+        expect(search).toHaveBeenCalledTimes(1)
+        expect(search.mock.calls[0][0]).toBe("session resume")
+      },
     })
   })
 })

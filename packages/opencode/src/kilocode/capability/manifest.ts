@@ -116,7 +116,7 @@ export namespace CapabilityManifest {
   ])
 
   const builtinInstruction = new Set(["invalid", "question"])
-  const builtinRead = new Set(["read", "glob", "grep", "skill", "kilo_local_recall"])
+  const builtinRead = new Set(["read", "glob", "grep", "skill", "kilo_local_recall", "semantic_search"])
   const builtinRemote = new Set(["webfetch", "websearch", "codesearch"])
   const builtinLocal = new Set([
     "bash",

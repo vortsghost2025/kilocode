@@ -138,6 +138,34 @@ export namespace ToolRegistry {
           ["app", "cli", "desktop", "vscode"].includes(Flag.KILO_CLIENT) || Flag.KILO_ENABLE_QUESTION_TOOL
         // kilocode_change end
 
+        // kilocode_change start - semantic_search is conditionally loaded when
+        // indexing is enabled. The tool itself enforces KiloIndexing.ready()
+        // before asking permission or calling search, so discovery only checks
+        // the config gate. Both optional imports are guarded so an unavailable
+        // module omits semantic_search without dropping any other tool and
+        // without returning early from all().
+        const semanticSearch: Tool.Info | undefined = cfg.indexing?.enabled
+          ? yield* Effect.gen(function* () {
+              const indexingLoaded = yield* Effect.tryPromise(() => import("@/kilocode/indexing")).pipe(
+                Effect.map(() => true),
+                Effect.catch((err) => {
+                  log.warn("semantic search unavailable - indexing module not loaded", { err })
+                  return Effect.succeed(false)
+                }),
+              )
+              if (!indexingLoaded) return undefined
+              const mod = yield* Effect.tryPromise(() => import("@/kilocode/tool/semantic-search")).pipe(
+                Effect.map((m: { SemanticSearchTool: Tool.Info }) => m.SemanticSearchTool as Tool.Info | undefined),
+                Effect.catch((err) => {
+                  log.warn("semantic search tool unavailable - module import failed", { err })
+                  return Effect.succeed(undefined)
+                }),
+              )
+              return mod
+            })
+          : undefined
+        // kilocode_change end
+
         return [
           InvalidTool,
           ...(question ? [QuestionTool] : []),
@@ -163,6 +191,7 @@ export namespace ToolRegistry {
           ...(Flag.KILO_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
           ...(cfg.experimental?.batch_tool === true ? [BatchTool] : []),
           PlanExitTool, // kilocode_change - always registered; gated by agent permission instead
+          ...(semanticSearch ? [semanticSearch] : []), // kilocode_change
           ...custom,
         ]
       })
