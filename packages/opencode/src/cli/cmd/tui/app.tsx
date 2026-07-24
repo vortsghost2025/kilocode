@@ -36,6 +36,9 @@ import { CommandProvider, useCommandDialog } from "@tui/component/dialog-command
 import { DialogAgent } from "@tui/component/dialog-agent"
 import { DialogSessionList } from "@tui/component/dialog-session-list"
 import { DialogWorkspaceList } from "@tui/component/dialog-workspace-list"
+// kilocode_change start
+import { DialogIndexing } from "@tui/component/dialog-indexing"
+// kilocode_change end
 import { KeybindProvider, useKeybind } from "@tui/context/keybind"
 import { ThemeProvider, useTheme } from "@tui/context/theme"
 import { Home } from "@tui/routes/home"
@@ -876,6 +879,19 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         }
         dialog.clear()
       },
+    },
+    // kilocode_change end
+    // kilocode_change start
+    {
+      title: "Codebase Indexing",
+      value: "indexing.settings",
+      slash: {
+        name: "indexing",
+      },
+      onSelect: (dialog) => {
+        dialog.replace(() => <DialogIndexing />)
+      },
+      category: "System",
     },
     // kilocode_change end
   ])
