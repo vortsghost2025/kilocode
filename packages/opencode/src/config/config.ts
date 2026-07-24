@@ -1186,7 +1186,7 @@ export namespace Config {
             .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
         })
         .optional(),
-      indexing: IndexingConfig.optional().describe("Codebase indexing configuration"),
+      indexing: IndexingConfig.optional().describe("Codebase indexing configuration"), // kilocode_change
     })
     .strict()
     .meta({

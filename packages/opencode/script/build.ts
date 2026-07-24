@@ -14,7 +14,9 @@ process.chdir(dir)
 
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
+// kilocode_change start
 import { LanceDBRuntime } from "../src/kilocode/lancedb"
+// kilocode_change end
 
 const modelsUrl = process.env.KILO_MODELS_URL || "https://models.dev"
 // Fetch and generate models.dev snapshot
@@ -209,7 +211,9 @@ for (const item of targets) {
   const rootPath = path.resolve(dir, "../../node_modules/@opentui/core/parser.worker.js")
   const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : rootPath)
   const workerPath = "./src/cli/cmd/tui/worker.ts"
+  // kilocode_change start
   const indexingWorkerPath = "./src/kilocode/indexing-worker.ts"
+  // kilocode_change end
 
   // Use platform-specific bunfs root path based on target OS
   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
@@ -219,7 +223,9 @@ for (const item of targets) {
     conditions: ["browser"],
     tsconfig: "./tsconfig.json",
     plugins: [plugin],
+    // kilocode_change start
     external: ["node-gyp", ...LanceDBRuntime.external],
+    // kilocode_change end
     compile: {
       autoloadBunfig: false,
       autoloadDotenv: false,
@@ -233,6 +239,7 @@ for (const item of targets) {
     files: {
       ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
     },
+    // kilocode_change start
     entrypoints: [
       "./src/index.ts",
       parserWorker,
@@ -240,12 +247,13 @@ for (const item of targets) {
       indexingWorkerPath,
       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
     ],
+    // kilocode_change end
     define: {
       KILO_VERSION: `'${Script.version}'`,
       KILO_MIGRATIONS: JSON.stringify(migrations),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
       KILO_WORKER_PATH: workerPath,
-      KILO_INDEXING_WORKER_PATH: indexingWorkerPath,
+      KILO_INDEXING_WORKER_PATH: indexingWorkerPath, // kilocode_change
       KILO_CHANNEL: `'${Script.channel}'`,
       KILO_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
     },
@@ -287,6 +295,7 @@ for (const item of targets) {
 
   await $`rm -rf ./dist/${name}/bin/tui`
 
+  // kilocode_change start
   // Install external LanceDB packages into the artifact package root for runtime resolution.
   // Must write a package.json first so bun treats the directory as a standalone project
   // rather than resolving into the monorepo workspace.
@@ -309,7 +318,9 @@ for (const item of targets) {
   if (nativeOk) console.log(`  native package: ${nativeDir}`)
   else console.warn(`  native package not found: ${nativeName} (may resolve from cache)`)
   console.log(`  lancedb js entry: ${pkgDir}/dist/index.js`)
+  // kilocode_change end
 
+  // kilocode_change start - uses rootDir from LanceDB install block above
   await Bun.file(`${rootDir}/package.json`).write(
     JSON.stringify(
       {
@@ -328,6 +339,7 @@ for (const item of targets) {
       2,
     ),
   )
+  // kilocode_change end
   binaries[name] = Script.version
 }
 

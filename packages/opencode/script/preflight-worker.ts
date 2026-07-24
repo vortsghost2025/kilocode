@@ -1,3 +1,4 @@
+// kilocode_change - new file
 import { LanceDBRuntime } from "../src/kilocode/lancedb"
 import { IndexingWorker } from "../src/kilocode/indexing-worker-client"
 import { tmpdir } from "os"

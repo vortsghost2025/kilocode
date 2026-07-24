@@ -1,3 +1,4 @@
+// kilocode_change - new file
 import { afterEach, describe, expect, test, mock } from "bun:test"
 import path from "path"
 import fs from "fs/promises"

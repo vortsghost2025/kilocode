@@ -15,7 +15,7 @@ export default `
 ; Variable declarations - capture the entire declaration
 (var_declaration) @name.definition.var
 
-; Constant declarations - capture the entire declaration  
+; Constant declarations - capture the entire declaration
 (const_declaration) @name.definition.const
 
 ; Package clause
