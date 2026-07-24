@@ -1,6 +1,5 @@
 // kilocode_change - new file
 import { createSignal, onMount, Show } from "solid-js"
-import { useSync } from "@tui/context/sync"
 import { useDialog } from "@tui/ui/dialog"
 import { useSDK } from "@tui/context/sdk"
 import { useTheme } from "@tui/context/theme"
@@ -8,17 +7,7 @@ import { useToast } from "@tui/ui/toast"
 import { TextAttributes } from "@opentui/core"
 import { useKeyboard } from "@opentui/solid"
 import { DialogSelect } from "@tui/ui/dialog-select"
-import { IndexingConfig } from "@kilocode/kilo-indexing/config"
-
-function getProviderOptions() {
-  const field = IndexingConfig.shape.provider
-  const innerType = (field as any)._def.innerType ?? field
-  const values = (innerType._def.values ?? []) as string[]
-  return values.map((v) => ({
-    title: v === "openai-compatible" ? "OpenAI Compatible" : v.charAt(0).toUpperCase() + v.slice(1),
-    value: v,
-  }))
-}
+import { indexingEnabledPatch, indexingProviderPatch, getProviderOptions } from "@/kilocode/indexing-settings"
 
 const providerOptions = getProviderOptions()
 
@@ -28,7 +17,6 @@ function providerTitle(v: string): string {
 }
 
 export function DialogIndexing() {
-  const sync = useSync()
   const dialog = useDialog()
   const sdk = useSDK()
   const { theme } = useTheme()
@@ -38,6 +26,7 @@ export function DialogIndexing() {
   const [provider, setProvider] = createSignal<string>("openai")
   const [active, setActive] = createSignal<"enabled" | "provider">("enabled")
   const [loaded, setLoaded] = createSignal(false)
+  const [saving, setSaving] = createSignal(false)
 
   onMount(async () => {
     dialog.setSize("medium")
@@ -50,69 +39,73 @@ export function DialogIndexing() {
     setLoaded(true)
   })
 
-  async function persistEnabled(next: boolean) {
-    const res = await sdk.client.config.get()
-    const current = res.data as any
-    const result = await sdk.client.config.update({
-      config: {
-        ...current,
-        indexing: {
-          ...(current?.indexing ?? {}),
-          enabled: next,
-        },
-      } as any,
-    })
-    if (result.error) {
-      toast.show({ variant: "error", message: "Failed to save indexing setting" })
-      return
+  async function persistEnabled(next: boolean): Promise<boolean> {
+    if (saving()) return false
+    setSaving(true)
+    try {
+      const result = await sdk.client.config.update({ config: indexingEnabledPatch(next) as any })
+      if (result.error) {
+        toast.show({ variant: "error", message: "Failed to save indexing setting" })
+        return false
+      }
+      setEnabled(next)
+      return true
+    } finally {
+      setSaving(false)
     }
-    setEnabled(next)
   }
 
-  async function persistProvider(next: string) {
-    const res = await sdk.client.config.get()
-    const current = res.data as any
-    const result = await sdk.client.config.update({
-      config: {
-        ...current,
-        indexing: {
-          ...(current?.indexing ?? {}),
-          provider: next,
-        },
-      } as any,
-    })
-    if (result.error) {
-      toast.show({ variant: "error", message: "Failed to save indexing provider" })
-      return
+  async function persistProvider(next: string): Promise<boolean> {
+    if (saving()) return false
+    setSaving(true)
+    try {
+      const result = await sdk.client.config.update({ config: indexingProviderPatch(next) as any })
+      if (result.error) {
+        toast.show({ variant: "error", message: "Failed to save indexing provider" })
+        return false
+      }
+      setProvider(next)
+      return true
+    } finally {
+      setSaving(false)
     }
-    setProvider(next)
+  }
+
+  async function toggleEnabled() {
+    if (saving()) return
+    await persistEnabled(!enabled())
+  }
+
+  function openProviderSelect() {
+    if (saving()) return
+    dialog.replace(() => (
+      <DialogSelect
+        title="Indexing provider"
+        options={providerOptions}
+        current={provider()}
+        onSelect={(opt) => {
+          opt.onSelect?.(dialog)
+          void persistProvider(opt.value).then((ok) => {
+            if (ok) dialog.replace(() => <DialogIndexing />)
+          })
+        }}
+      />
+    ))
   }
 
   useKeyboard((evt) => {
     if (evt.name === "tab") {
       setActive((prev) => (prev === "enabled" ? "provider" : "enabled"))
       evt.preventDefault()
+      return
     }
     if (evt.name === "space" || evt.name === " ") {
-      if (active() === "enabled") {
-        persistEnabled(!enabled())
-      }
+      if (active() === "enabled") void toggleEnabled()
       evt.preventDefault()
+      return
     }
     if (evt.name === "return") {
-      if (active() === "provider") {
-        dialog.replace(() => (
-          <DialogSelect
-            title="Indexing provider"
-            options={providerOptions}
-            current={provider()}
-            onSelect={(opt) => {
-              persistProvider(opt.value)
-              dialog.replace(() => <DialogIndexing />)
-            }}
-          />
-        ))
-      }
+      if (active() === "provider") openProviderSelect()
       evt.preventDefault()
     }
   })
@@ -135,7 +128,10 @@ export function DialogIndexing() {
             gap={2}
             paddingLeft={1}
             backgroundColor={active() === "enabled" ? theme.backgroundElement : undefined}
-            onMouseUp={() => setActive("enabled")}
+            onMouseUp={() => {
+              setActive("enabled")
+              void toggleEnabled()
+            }}
           >
             <text fg={active() === "enabled" ? theme.primary : theme.textMuted}>{enabled() ? "[x]" : "[ ]"}</text>
             <text fg={active() === "enabled" ? theme.primary : theme.text}>Enabled</text>
@@ -145,7 +141,10 @@ export function DialogIndexing() {
             gap={2}
             paddingLeft={1}
             backgroundColor={active() === "provider" ? theme.backgroundElement : undefined}
-            onMouseUp={() => setActive("provider")}
+            onMouseUp={() => {
+              setActive("provider")
+              openProviderSelect()
+            }}
           >
             <text fg={active() === "provider" ? theme.primary : theme.textMuted}>{`\u2192`}</text>
             <text fg={active() === "provider" ? theme.primary : theme.text}>Provider: {providerTitle(provider())}</text>
