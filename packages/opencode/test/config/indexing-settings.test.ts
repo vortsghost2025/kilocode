@@ -4,13 +4,26 @@ import path from "path"
 import fs from "fs/promises"
 import { Config } from "../../src/config/config"
 import { Instance } from "../../src/project/instance"
+import { Global } from "../../src/global"
 import { Filesystem } from "../../src/util/filesystem"
 import { indexingEnabledPatch, indexingProviderPatch, getProviderOptions } from "../../src/kilocode/indexing-settings"
-import { tmpdir } from "../fixture/fixture"
+
+// The test preload (test/preload.ts) sets XDG_CONFIG_HOME to an isolated tmp
+// directory, so Global.Path.config already points at <tmp>/config/kilo/ and
+// the real user profile is never touched. We additionally clear that isolated
+// dir in afterEach so each test starts from a clean global config state.
+const globalConfigDir = Global.Path.config
+
+async function clearGlobalConfig() {
+  for (const f of ["kilo.jsonc", "kilo.json", "opencode.jsonc", "opencode.json", "config.json"]) {
+    await fs.rm(path.join(globalConfigDir, f), { force: true }).catch(() => {})
+  }
+  await Config.invalidate()
+}
 
 afterEach(async () => {
   await Instance.disposeAll()
-  await Config.invalidate()
+  await clearGlobalConfig()
 })
 
 describe("indexing settings patch builders", () => {
@@ -34,7 +47,7 @@ describe("indexing settings patch builders", () => {
     expect(Object.keys(patch.indexing)).toEqual(["provider"])
   })
 
-  test("neither patch carries model, username, api keys, or unrelated fields", () => {
+  test("neither patch carries model, username, permission, credentials, or unrelated fields", () => {
     const enabledPatch = indexingEnabledPatch(true) as Record<string, any>
     const providerPatch = indexingProviderPatch("ollama") as Record<string, any>
 
@@ -66,7 +79,7 @@ describe("indexing settings patch builders", () => {
     }
   })
 
-  test("provider option list is derived from the schema and is non-empty", () => {
+  test("provider option list is derived from the IndexingConfig schema and is non-empty", () => {
     const opts = getProviderOptions()
     expect(opts.length).toBeGreaterThan(0)
     expect(opts.map((o) => o.value)).toContain("ollama")
@@ -79,114 +92,104 @@ describe("indexing settings patch builders", () => {
   })
 })
 
-describe("indexing initial display reads from config", () => {
-  test("indexing.enabled and indexing.provider come from Config.get", async () => {
-    await using tmp = await tmpdir({
-      config: { indexing: { enabled: true, provider: "ollama" } },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const cfg = await Config.get()
-        expect(cfg.indexing?.enabled).toBe(true)
-        expect(cfg.indexing?.provider).toBe("ollama")
-      },
-    })
-  })
-
+describe("global indexing read", () => {
   test("absent indexing block yields undefined enabled/provider", async () => {
-    await using tmp = await tmpdir()
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const cfg = await Config.get()
-        expect(cfg.indexing).toBeUndefined()
-      },
-    })
+    const cfg = await Config.getGlobal()
+    // No indexing key in a fresh global config dir.
+    expect(cfg.indexing).toBeUndefined()
   })
 })
 
-describe("Config.update writes minimal patches", () => {
-  test("enabled-only patch writes only indexing.enabled into config.json", async () => {
-    // Unrelated keys (model, username) live in opencode.json (loaded by the project loader).
-    // Provided indexing credentials live in opencode.json too, and stay untouched.
-    await using tmp = await tmpdir({
-      config: {
-        model: "test/model",
-        username: "testuser",
-        indexing: {
-          enabled: false,
-          provider: "openai",
-          openai: { apiKey: "sk-secret" },
-        },
-      },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        await Config.update(indexingEnabledPatch(true) as any)
-      },
-    })
+describe("global indexing persistence survives a fresh reload", () => {
+  test("enabled update survives a fresh Config.getGlobal reload", async () => {
+    await Config.updateGlobal(indexingEnabledPatch(true) as any)
 
-    // config.json (written by Config.update) must contain ONLY the enabled patch.
-    // Unrelated keys and credentials must remain in opencode.json, untouched.
-    const opencodeRaw = await Filesystem.readJson(path.join(tmp.path, "opencode.json"))
-    expect((opencodeRaw as any).model).toBe("test/model")
-    expect((opencodeRaw as any).username).toBe("testuser")
-    expect((opencodeRaw as any).indexing?.provider).toBe("openai")
-    expect((opencodeRaw as any).indexing?.openai?.apiKey).toBe("sk-secret")
-    expect((opencodeRaw as any).indexing?.enabled).toBe(false)
-
-    const configRaw = await Filesystem.readJson(path.join(tmp.path, "config.json"))
-    expect((configRaw as any).indexing?.enabled).toBe(true)
-    expect(Object.keys((configRaw as any).indexing ?? {})).toEqual(["enabled"])
-    expect((configRaw as any).model).toBeUndefined()
-    expect((configRaw as any).username).toBeUndefined()
-    expect((configRaw as any).permission).toBeUndefined()
-    expect((configRaw as any).openai).toBeUndefined()
-    expect((configRaw as any).kilo).toBeUndefined()
-    expect((configRaw as any).indexing?.provider).toBeUndefined()
-    expect((configRaw as any).indexing?.openai).toBeUndefined()
+    const reloaded = await Config.getGlobal()
+    expect(reloaded.indexing?.enabled).toBe(true)
   })
 
-  test("provider-only patch writes only indexing.provider into config.json", async () => {
-    await using tmp = await tmpdir({
-      config: {
-        model: "test/model",
-        indexing: {
-          enabled: true,
-          provider: "openai",
-          openai: { apiKey: "sk-secret" },
-          ollama: { baseUrl: "http://localhost:11434" },
-        },
-      },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        await Config.update(indexingProviderPatch("ollama") as any)
-      },
-    })
+  test("provider update survives a fresh Config.getGlobal reload", async () => {
+    await Config.updateGlobal(indexingProviderPatch("ollama") as any)
 
-    const opencodeRaw = await Filesystem.readJson(path.join(tmp.path, "opencode.json"))
-    expect((opencodeRaw as any).model).toBe("test/model")
-    expect((opencodeRaw as any).indexing?.enabled).toBe(true)
-    expect((opencodeRaw as any).indexing?.provider).toBe("openai")
-    expect((opencodeRaw as any).indexing?.openai?.apiKey).toBe("sk-secret")
-    expect((opencodeRaw as any).indexing?.ollama?.baseUrl).toBe("http://localhost:11434")
+    const reloaded = await Config.getGlobal()
+    expect(reloaded.indexing?.provider).toBe("ollama")
+  })
 
-    const configRaw = await Filesystem.readJson(path.join(tmp.path, "config.json"))
-    expect((configRaw as any).indexing?.provider).toBe("ollama")
-    expect(Object.keys((configRaw as any).indexing ?? {})).toEqual(["provider"])
-    expect((configRaw as any).model).toBeUndefined()
-    expect((configRaw as any).indexing?.enabled).toBeUndefined()
-    expect((configRaw as any).indexing?.openai).toBeUndefined()
-    expect((configRaw as any).indexing?.ollama).toBeUndefined()
-    expect((configRaw as any).openai).toBeUndefined()
+  test("second enabled-only update preserves an already-saved provider", async () => {
+    await Config.updateGlobal(indexingProviderPatch("ollama") as any)
+    await Config.updateGlobal(indexingEnabledPatch(true) as any)
+
+    const reloaded = await Config.getGlobal()
+    expect(reloaded.indexing?.provider).toBe("ollama")
+    expect(reloaded.indexing?.enabled).toBe(true)
+  })
+
+  test("provider-only update preserves an already-saved enabled value", async () => {
+    await Config.updateGlobal(indexingEnabledPatch(true) as any)
+    await Config.updateGlobal(indexingProviderPatch("gemini") as any)
+
+    const reloaded = await Config.getGlobal()
+    expect(reloaded.indexing?.enabled).toBe(true)
+    expect(reloaded.indexing?.provider).toBe("gemini")
+  })
+
+  test("saved global file contains the indexing patch and no credentials", async () => {
+    await Config.updateGlobal(indexingProviderPatch("ollama") as any)
+
+    // The written global config file is the first existing candidate. Since
+    // we cleared the dir, Config.updateGlobal creates the default (kilo.jsonc).
+    const defs = ["kilo.jsonc", "kilo.json", "opencode.jsonc", "opencode.json", "config.json"]
+    let written: any = undefined
+    for (const f of defs) {
+      const p = path.join(globalConfigDir, f)
+      const exists = await fs
+        .stat(p)
+        .then(() => true)
+        .catch(() => false)
+      if (exists) {
+        const text = await fs.readFile(p, "utf-8")
+        written = JSON.parse(text)
+        break
+      }
+    }
+    expect(written).toBeDefined()
+    expect(written.indexing?.provider).toBe("ollama")
+    // No credentials leaked into the written file
+    expect(written.openai).toBeUndefined()
+    expect(written.kilo).toBeUndefined()
+    expect(written.gemini).toBeUndefined()
+    expect((written.indexing ?? {}).openai).toBeUndefined()
+    expect((written.indexing ?? {}).kilo).toBeUndefined()
+    expect((written.indexing ?? {}).gemini).toBeUndefined()
   })
 })
 
-describe("indexing settings UI presence", () => {
+describe("global indexing apply preserves unrelated fields already in the file", () => {
+  test("enabled update preserves model already in the global file", async () => {
+    // Seed an existing global config file with a model key.
+    await fs.mkdir(globalConfigDir, { recursive: true })
+    await Bun.write(path.join(globalConfigDir, "kilo.jsonc"), JSON.stringify({ model: "anthropic/claude-3" }, null, 2))
+    await Config.invalidate()
+
+    await Config.updateGlobal(indexingEnabledPatch(true) as any)
+    const reloaded = await Config.getGlobal()
+    expect(reloaded.model).toBe("anthropic/claude-3")
+    expect(reloaded.indexing?.enabled).toBe(true)
+  })
+
+  test("provider update preserves username already in the global file", async () => {
+    await fs.mkdir(globalConfigDir, { recursive: true })
+    await Bun.write(path.join(globalConfigDir, "kilo.jsonc"), JSON.stringify({ username: "someone" }, null, 2))
+    await Config.invalidate()
+
+    await Config.updateGlobal(indexingProviderPatch("ollama") as any)
+    const reloaded = await Config.getGlobal()
+    expect(reloaded.username).toBe("someone")
+    expect(reloaded.indexing?.provider).toBe("ollama")
+  })
+})
+
+describe("indexing settings UI source presence (secondary checks)", () => {
   test("dialog-indexing.tsx renders the required section title and explanation", async () => {
     const src = await fs.readFile(
       path.join(import.meta.dir, "../../src/cli/cmd/tui/component/dialog-indexing.tsx"),
@@ -203,14 +206,20 @@ describe("indexing settings UI presence", () => {
     expect(src).toContain("DialogIndexing")
   })
 
-  test("dialog uses patch helpers, never spreads config.get into update", async () => {
+  test("dialog uses global.config endpoints with patch helpers, never spreads config", async () => {
     const src = await fs.readFile(
       path.join(import.meta.dir, "../../src/cli/cmd/tui/component/dialog-indexing.tsx"),
       "utf-8",
     )
+    expect(src).toContain("sdk.client.global.config.get")
+    expect(src).toContain("sdk.client.global.config.update")
     expect(src).toContain("indexingEnabledPatch")
     expect(src).toContain("indexingProviderPatch")
+    // The unsafe pattern of spreading config.get into config.update must be absent
     expect(src).not.toContain("...current")
     expect(src).not.toContain("...res.data")
+    // Must NOT use the project config endpoint (which writes to an unread config.json)
+    expect(src).not.toContain("sdk.client.config.get")
+    expect(src).not.toContain("sdk.client.config.update")
   })
 })

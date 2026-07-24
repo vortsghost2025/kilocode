@@ -30,7 +30,8 @@ export function DialogIndexing() {
 
   onMount(async () => {
     dialog.setSize("medium")
-    const res = await sdk.client.config.get()
+    // global.config.get persists to the active XDG profile so settings survive restart.
+    const res = await sdk.client.global.config.get()
     if (res.data) {
       const idx = (res.data as any).indexing ?? {}
       setEnabled(!!idx.enabled)
@@ -43,7 +44,7 @@ export function DialogIndexing() {
     if (saving()) return false
     setSaving(true)
     try {
-      const result = await sdk.client.config.update({ config: indexingEnabledPatch(next) as any })
+      const result = await sdk.client.global.config.update({ config: indexingEnabledPatch(next) as any })
       if (result.error) {
         toast.show({ variant: "error", message: "Failed to save indexing setting" })
         return false
@@ -59,7 +60,7 @@ export function DialogIndexing() {
     if (saving()) return false
     setSaving(true)
     try {
-      const result = await sdk.client.config.update({ config: indexingProviderPatch(next) as any })
+      const result = await sdk.client.global.config.update({ config: indexingProviderPatch(next) as any })
       if (result.error) {
         toast.show({ variant: "error", message: "Failed to save indexing provider" })
         return false
