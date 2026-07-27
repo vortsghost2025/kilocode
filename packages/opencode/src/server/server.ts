@@ -18,6 +18,7 @@ import { errorHandler } from "./middleware"
 import { InstanceRoutes } from "./instance"
 import { initProjectors } from "./projectors"
 import * as KiloServer from "../kilocode/server/server" // kilocode_change
+import { ListenerPolicy } from "./listener-policy" // kilocode_change
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -308,9 +309,30 @@ export namespace Server {
       log.warn("mDNS enabled but hostname is loopback; skipping mDNS publish")
     }
 
+    // kilocode_change start
+    // Publish the listener policy AFTER Bun.serve succeeds. A failed startup
+    // attempt (tryServe returns undefined and the throw above) must not leave a
+    // newly published policy behind. Use the actual successful hostname the
+    // server bound to rather than the requested opts.hostname, and normalize the
+    // typed cors value provided by ControlPlaneRoutes' caller without casts.
+    // Capture the publication token so server.stop can release ONLY this
+    // publication; a stale stop belonging to an older publication must not
+    // clear a newer server's policy.
+    const boundHostname =
+      typeof server.hostname === "string" && server.hostname.length > 0 ? server.hostname : opts.hostname
+    const publishedOrigins = Array.isArray(opts.cors) ? [...opts.cors] : []
+    const policyToken = ListenerPolicy.setFromServerConfig(boundHostname, publishedOrigins)
+    // kilocode_change end
+
     const originalStop = server.stop.bind(server)
     server.stop = async (closeActiveConnections?: boolean) => {
       if (shouldPublishMDNS) MDNS.unpublish()
+      // kilocode_change start
+      // Release ONLY the policy this server published. If a newer publication
+      // already replaced it, this release is a no-op and the newer policy
+      // is preserved.
+      ListenerPolicy.release(policyToken)
+      // kilocode_change end
       return originalStop(closeActiveConnections)
     }
 

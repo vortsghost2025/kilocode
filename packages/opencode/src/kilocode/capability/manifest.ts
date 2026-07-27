@@ -129,7 +129,7 @@ export namespace CapabilityManifest {
     "lsp",
   ])
   const builtinUpload = new Set(["codebase_search"])
-  const builtinAdmin = new Set(["task", "background_task", "batch"])
+  const builtinAdmin = new Set(["task", "background_task", "batch", "terminal"])
   const builtinKnown = new Set([
     ...builtinInstruction,
     ...builtinRead,
@@ -264,9 +264,7 @@ export namespace CapabilityManifest {
       const local = input.filesystem.writeRoots.length > 0 || shell || gitWrite || localTool
       const remoteRead = remoteTool
       const read =
-        input.filesystem.readRoots.length > 0 ||
-        input.git.action !== "deny" ||
-        tools.some((id) => builtinRead.has(id))
+        input.filesystem.readRoots.length > 0 || input.git.action !== "deny" || tools.some((id) => builtinRead.has(id))
       const minimum = (() => {
         if (input.classification === "admin" || admin) return 5
         if (remote) return 4

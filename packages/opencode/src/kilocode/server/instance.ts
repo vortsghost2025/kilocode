@@ -22,9 +22,29 @@ import { Session } from "../../session"
 import { Identifier } from "../../id/id"
 import { SessionTable, MessageTable, PartTable } from "../../session/session.sql"
 import { Bus } from "@/bus"
+import { Flag } from "../../flag/flag" // kilocode_change
+import { SharedTerminalRoutes } from "../shared-terminal/routes" // kilocode_change
+import { sharedTerminalRuntime } from "../shared-terminal/runtime" // kilocode_change
+import { ListenerPolicy } from "../../server/listener-policy" // kilocode_change
 
 export function register(app: Hono): Hono {
-  return app
+  // kilocode_change start
+  // ST-06Q1: mount the shared-terminal route only when the experimental flag
+  // is on. Pass the runtime getter itself (sharedTerminalRuntime) rather than
+  // its current result, so the lazily reused Hono app never captures one
+  // workspace's runtime. The getter is NOT called here. Q1 returns a 503
+  // quarantine response without ever invoking the getter.
+  // kilocode_change end
+  const withSharedTerminal: Hono = Flag.KILO_EXPERIMENTAL_SHARED_TERMINAL
+    ? app.route(
+        "/shared-terminal",
+        SharedTerminalRoutes({
+          listenerPolicy: ListenerPolicy.current,
+          runtimeGetter: sharedTerminalRuntime,
+        }),
+      )
+    : app
+  return withSharedTerminal
     .route("/permission", PermissionKilocodeRoutes())
     .route("/network", NetworkRoutes())
     .route("/telemetry", TelemetryRoutes())

@@ -29,6 +29,7 @@ import { CodebaseSearchTool } from "./warpgrep" // kilocode_change
 import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
 import { LspTool } from "./lsp"
+import { TerminalTool } from "@/kilocode/shared-terminal/tool" // kilocode_change
 import { Truncate } from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
 import { RecallTool } from "./recall" // kilocode_change
@@ -188,6 +189,7 @@ export namespace ToolRegistry {
           RecallTool, // kilocode_change
           RememberTool, // kilocode_change
           ApplyPatchTool,
+          ...(Flag.KILO_EXPERIMENTAL_SHARED_TERMINAL ? [TerminalTool] : []), // kilocode_change
           ...(Flag.KILO_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
           ...(cfg.experimental?.batch_tool === true ? [BatchTool] : []),
           PlanExitTool, // kilocode_change - always registered; gated by agent permission instead

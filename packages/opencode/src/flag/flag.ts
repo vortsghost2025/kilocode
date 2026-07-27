@@ -65,6 +65,10 @@ export namespace Flag {
   )
   export const KILO_EXPERIMENTAL_PLAN_MODE = KILO_EXPERIMENTAL || truthy("KILO_EXPERIMENTAL_PLAN_MODE")
   export const KILO_EXPERIMENTAL_WORKSPACES = KILO_EXPERIMENTAL || truthy("KILO_EXPERIMENTAL_WORKSPACES")
+  // kilocode_change - Kilo-only shared-terminal feature flag. Off by default.
+  // ST-03 adds the flag only; no command, route, tool, service, or UI is
+  // registered in this unit.
+  export const KILO_EXPERIMENTAL_SHARED_TERMINAL = truthy("KILO_EXPERIMENTAL_SHARED_TERMINAL")
   export const KILO_EXPERIMENTAL_MARKDOWN = !falsy("KILO_EXPERIMENTAL_MARKDOWN")
   export const KILO_MODELS_URL = process.env["KILO_MODELS_URL"]
   export const KILO_MODELS_PATH = process.env["KILO_MODELS_PATH"]
