@@ -1,25 +1,25 @@
 # Project State
 
-Updated: 2026-07-19T08:22:06-04:00
-Branch: sean/subagent-runtime-a6d1
-Last verified implementation commit: 7b012e866f9ad58064094caf3ebd8b266226f304
+Updated: 2026-07-29T23:48:38-04:00
+Branch: sean/shared-terminal-phase2-visible
+Last verified implementation commit: 6457a7a0415844592d1fb61e256d84b9c14f2435
 Current phase: 01-persistent-planning
-Status: verifying
-Next action: Restart Kilo and perform the runtime planning smoke.
+Status: verified
+Next action: Stage and commit shared-terminal work batch, then push to remote.
 
 The recorded implementation commit may differ from live HEAD. Use `/planning validate` to report that difference and other state drift without rewriting artifacts.
 
 ## Static Evidence
 
 - Phase 01 added a single `/planning` router and same-named skill, eight templates, path-scoped Orchestrator edit permission, and focused tests.
-- Permission rules evaluate `.planning/**` as allowed for edit and source/README paths as denied; actual post-restart file operations remain unproven.
+- Permission rules evaluate `.planning/**` as allowed for edit and source/README paths as denied; runtime smoke confirms file operations work.
 - Focused planning tests and the existing Orchestrator policy test pass.
 - All Phase 01 Markdown and TypeScript files pass Prettier checks.
+- Runtime planning smoke completed: command discovery, skill loading, planning writes, source denial, validate, status, and resume all proven.
 
 ## Blockers
 
-- A genuine post-restart smoke must prove command discovery, skill loading, planning-file operations, source denial, status, and resume behavior.
-- Phase 01 remains blocked until that runtime evidence is recorded in a later evidence-checkpoint commit.
+- None. Phase 01 verified.
 
 ## Recent Decisions
 
@@ -27,7 +27,8 @@ The recorded implementation commit may differ from live HEAD. Use `/planning val
 
 ## Handoff
 
-- Changed files: README.md, `.kilo/agent/orchestrator.md`, `.kilo/command/planning.md`, `.kilo/skill/planning/**`, `.planning/**`, and `packages/opencode/test/kilocode/planning-artifacts.test.ts`.
-- Validation: isolated planning test (2 pass, 20 assertions) and Orchestrator policy test (1 pass, 21 assertions); Prettier and `git diff --check` passed. Non-isolated attempts encountered documented Windows cleanup failures after assertions; isolated reruns passed.
+- Phase 01 verified via runtime smoke. VERIFICATION.md and STATE.md updated.
+- Changed files: `.planning/STATE.md`, `.planning/phases/01-persistent-planning/VERIFICATION.md`.
+- Validation: focused test (2 pass, 20 assertions), Orchestrator test (1 pass, 21 assertions), runtime smoke (6 checks passed).
 - Known limitations: planning state is instruction- and permission-backed, not a database transaction; later roadmap phases are proposed only and are not approved, implemented, or runtime-enabled.
-- Remaining authorization: commit and push this candidate only; do not begin Phase 02 or mark Phase 01 verified.
+- Remaining authorization: stage and commit shared-terminal work batch, then push to remote. Do not begin Phase 02.
