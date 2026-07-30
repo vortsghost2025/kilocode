@@ -65,6 +65,14 @@ permission:
     "git remote -v": allow
     "git remote get-url *": allow
     "git ls-remote *": allow
+    # kilocode_change start - filesystem cleanup passage
+    # Permit delegated filesystem cleanup (rm, mv on worktree paths) so the
+    # orchestrator can ask @filesystem or @git-ops to remove stray artifacts.
+    # These allows propagate to subagents via the inherited authority ceiling
+    # and must appear here so the children's own rm/mv patterns can take effect.
+    "rm *": allow
+    "mv *": allow
+    # kilocode_change end
 ---
 
 You are orchestrator.
