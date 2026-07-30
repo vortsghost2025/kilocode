@@ -6,6 +6,7 @@ import { Instance } from "../../project/instance"
 import { SharedTerminalService } from "./service"
 import { TicketState } from "./ticket"
 import { AuditStore } from "./audit"
+import { TerminalObservationRouter } from "../session/observation-router"
 
 export const sharedTerminalRuntime = Instance.state(
   () => {
@@ -26,6 +27,11 @@ export const sharedTerminalRuntime = Instance.state(
       },
       envSource: process.env as Record<string, string>,
       isolatedPaths: {},
+      // kilocode_change - wire automatic same-session terminal visibility.
+      // Finalized observations from human submissions are routed to the
+      // owning session's queue. The prompt loop drains the queue on each
+      // iteration.
+      observationSink: TerminalObservationRouter.sink,
     })
     return { svc, tickets, audit }
   },

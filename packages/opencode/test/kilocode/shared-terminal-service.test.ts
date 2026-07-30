@@ -2256,7 +2256,7 @@ describe("SharedTerminalService: audit outcomes", () => {
     // Successful acquire lease
     const lease = await svc.acquireLease(r.info.id, { ref: r.ref, actor: agentActor, now: ctl.now() })
     // Successful write
-    await svc.writeAgent(r.info.id, {
+    const refreshed = await svc.writeAgent(r.info.id, {
       ref: r.ref,
       leaseID: lease.id,
       revision: lease.revision,
@@ -2273,7 +2273,7 @@ describe("SharedTerminalService: audit outcomes", () => {
       await svc.writeAgent(r.info.id, {
         ref: r.ref,
         leaseID: lease.id,
-        revision: lease.revision,
+        revision: refreshed.revision,
         actor: agentActor,
         data: "x\r",
         now: ctl.now(),
@@ -2660,7 +2660,7 @@ describe("SharedTerminalService: attachWithTicket and detach", () => {
     await svc.disposeTerminal(r.info.id)
   })
 
-  test("write-mode attachment submitHuman writes data to PTY", async () => {
+  test("write-mode attachment forwards one carriage-return byte to PTY exactly once", async () => {
     const capturedEnvs: Array<Record<string, string>> = []
     const fakeSpawnObj = fakeSpawn({ envs: capturedEnvs })
     const { svc, tickets, clock: ctl } = makeSvc({ spawn: fakeSpawnObj.fn })
@@ -2685,8 +2685,8 @@ describe("SharedTerminalService: attachWithTicket and detach", () => {
       rawTicket: ticket.raw,
       callbacks: { onFrame: () => {}, onEvent: () => {}, onError: () => {} },
     })
-    await svc.submitHuman(r.info.id, att.attachmentID, "echo hello\r", ctl.now())
-    expect(fakeSpawnObj.writeData).toContain("echo hello\r")
+    await svc.submitHuman(r.info.id, att.attachmentID, "\r", ctl.now())
+    expect(fakeSpawnObj.writeData).toEqual(["\r"])
     await svc.detach(r.info.id, att.attachmentID)
     await svc.disposeTerminal(r.info.id)
   })

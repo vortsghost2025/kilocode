@@ -7,6 +7,7 @@ import {
   For,
   Match,
   on,
+  onCleanup,
   onMount,
   Show,
   Switch,
@@ -84,6 +85,9 @@ import { UI } from "@/cli/ui.ts"
 import { useTuiConfig } from "../../context/tui-config"
 import { formatMarkdownTables } from "../../util/markdown" // kilocode_change
 import { bell } from "@/kilocode/bell" // kilocode_change
+import { createTuiTerminal, SharedTerminalPanel, type TuiTerminalClient } from "@/kilocode/shared-terminal/tui" // kilocode_change
+import { SharedTerminalDebug } from "@/kilocode/shared-terminal/debug" // kilocode_change
+import { Footer } from "./footer" // kilocode_change
 
 addDefaultParsers(parsers.parsers)
 
@@ -116,7 +120,8 @@ function use() {
   return ctx
 }
 
-export function Session() {
+export function Session(props: { terminal?: TuiTerminalClient }) {
+  // kilocode_change
   const route = useRouteData("session")
   const { navigate } = useRoute()
   const sync = useSync()
@@ -197,6 +202,7 @@ export function Session() {
   )
   // kilocode_change end
 
+  SharedTerminalDebug.count("Session.component_body") // kilocode_change
   const dimensions = useTerminalDimensions()
   const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
@@ -285,6 +291,19 @@ export function Session() {
   const keybind = useKeybind()
   const dialog = useDialog()
   const renderer = useRenderer()
+  // kilocode_change start - session-owned integrated terminal view
+  const panelHeight = createMemo(() => Math.max(8, Math.min(16, Math.floor(dimensions().height * 0.35))))
+  const terminal = props.terminal
+    ? createTuiTerminal({
+        client: props.terminal,
+        sessionID: route.sessionID,
+        directory: () => session()?.directory ?? process.cwd(),
+        size: () => ({ cols: Math.max(1, contentWidth() - 2), rows: Math.max(1, panelHeight() - 2) }),
+        focus: () => prompt?.focus(),
+        error: (message) => toast.show({ message, variant: "error", duration: 6000 }),
+      })
+    : undefined
+  // kilocode_change end
 
   // Allow exit when in child session (prompt is hidden)
   const exit = useExit()
@@ -410,7 +429,31 @@ export function Session() {
   }
 
   const command = useCommandDialog()
+  SharedTerminalDebug.count("Session.command_input_call") // kilocode_change
+  const releaseTerminal = terminal ? command.input(terminal) : undefined // kilocode_change
+  SharedTerminalDebug.count("Session.releaseTerminal_set") // kilocode_change
+  onCleanup(() => {
+    SharedTerminalDebug.count("Session.cleanup") // kilocode_change
+    releaseTerminal?.()
+  }) // kilocode_change
   command.register(() => [
+    // kilocode_change start - integrated terminal palette, slash, and keybind action
+    ...(terminal
+      ? [
+          {
+            title: terminal.visible() ? "Hide terminal" : "Open terminal",
+            value: "shared-terminal.toggle",
+            keybind: "terminal_toggle",
+            category: "Session",
+            slash: { name: "shared-terminal" },
+            onSelect: async (dialog: DialogContext) => {
+              dialog.clear()
+              await terminal.toggle().catch(() => {})
+            },
+          },
+        ]
+      : []),
+    // kilocode_change end
     {
       title: session()?.share?.url ? "Copy share link" : "Share session",
       value: "session.share",
@@ -1208,6 +1251,16 @@ export function Session() {
                 )}
               </For>
             </scrollbox>
+            {/* kilocode_change start - real PTY panel inside the session layout */}
+            <Show when={terminal?.visible()}>
+              <SharedTerminalPanel
+                terminal={terminal!}
+                height={panelHeight()}
+                cols={Math.max(1, contentWidth() - 2)}
+                rows={Math.max(1, panelHeight() - 2)}
+              />
+            </Show>
+            {/* kilocode_change end */}
             <box flexShrink={0}>
               <Show when={permissions().length > 0}>
                 <PermissionPrompt request={permissions()[0]} />
@@ -1243,8 +1296,27 @@ export function Session() {
                 onSubmit={() => {
                   toBottom()
                 }}
+                onShell={terminal ? (value) => terminal.run(value) : undefined} // kilocode_change
+                // kilocode_change start - the prompt textarea calls onStealFocus
+                // whenever the human clicks/refocuses the chat box. That is the
+                // real input-ownership transfer event (not the mount-time ref
+                // callback, which only fires once). It deactivates the visible
+                // shared-terminal so Backspace/Enter reach the prompt instead of
+                // the PTY while the terminal stays visible and attached. The
+                // terminal panel re-activates input on its own onMouseDown.
+                onStealFocus={
+                  terminal
+                    ? () => {
+                        terminal.deactivate()
+                      }
+                    : undefined
+                }
+                // kilocode_change end
                 sessionID={route.sessionID}
               />
+              {/* kilocode_change start - visible terminal footer action */}
+              <Footer terminal={terminal} />
+              {/* kilocode_change end */}
             </box>
           </Show>
           <Toast />

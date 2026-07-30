@@ -6,6 +6,7 @@ import {
   type ToolTerminalRef,
   type ReleaseInput,
   type ReleaseResult,
+  type TerminalToolInput,
 } from "../../src/kilocode/shared-terminal/tool"
 import { SharedTerminalSchema as S } from "../../src/kilocode/shared-terminal/schema"
 import type { Tool } from "../../src/tool/tool"
@@ -36,6 +37,14 @@ const CALL_ID = "call-1"
 const AGENT_ID = "orchestrator"
 
 const agentActor: S.Actor = { type: "agent", sessionID: SESSION_ID, agentID: AGENT_ID, callID: CALL_ID }
+
+function expectInput<T extends TerminalToolInput["action"]>(
+  value: unknown,
+  action: T,
+): asserts value is Extract<TerminalToolInput, { action: T }> {
+  expect(value).toBeObject()
+  expect(value).toHaveProperty("action", action)
+}
 
 const BASE_INFO: S.Info = {
   id: "st-1",
@@ -254,6 +263,24 @@ async function run(seam: TerminalToolService, ctx: Tool.Context, input: unknown)
   return init.execute(args, ctx) as Promise<{ title: string; metadata: Record<string, unknown>; output: string }>
 }
 
+// Execute with the RAW provider-shaped args, WITHOUT calling
+// init.parameters.parse() first. This reproduces the live Tool.define path:
+// Tool.define validates via `parameters.parse(args)` but discards the Zod
+// transform output and invokes execute() with the original args. So a provider
+// that serializes `revision: 0` as the string "0" reaches execute() as a
+// string even though the schema transform would have normalized it. The test
+// seam's `run()` helper parses first, which masks the live defect; runRaw()
+// surfaces it by forwarding the provider-shaped value verbatim to execute().
+async function runRaw(seam: TerminalToolService, ctx: Tool.Context, input: unknown) {
+  const tool = (
+    TerminalTool as Tool.Info & {
+      attachForTest(seam: TerminalToolService, ctx: TerminalToolContext): Tool.Info
+    }
+  ).attachForTest(seam, trustedCtx())
+  const init = await tool.init()
+  return init.execute(input, ctx) as Promise<{ title: string; metadata: Record<string, unknown>; output: string }>
+}
+
 afterEach(() => {
   ;(TerminalTool as { resetForTest?: () => void }).resetForTest?.()
 })
@@ -298,6 +325,102 @@ describe("terminal tool: strict discriminated union", () => {
     }
     expect(init.parameters.safeParse({ action: "create" }).success).toBe(true)
     expect(init.parameters.safeParse({ action: "create", title: "x", cols: 100, rows: 30 }).success).toBe(true)
+  })
+})
+
+// =============================================================================
+// Schema coercion tests for cols/rows (string -> number)
+// =============================================================================
+
+describe("terminal tool: schema coercion for cols/rows", () => {
+  test("create accepts numeric cols/rows", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    const result = init.parameters.safeParse({ action: "create", cols: 120, rows: 40 })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expectInput(result.data, "create")
+      expect(result.data.cols).toBe(120)
+      expect(result.data.rows).toBe(40)
+      expect(typeof result.data.cols).toBe("number")
+      expect(typeof result.data.rows).toBe("number")
+    }
+  })
+
+  test("create accepts numeric string cols/rows (coercion)", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    const result = init.parameters.safeParse({ action: "create", cols: "120", rows: "40" })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expectInput(result.data, "create")
+      expect(result.data.cols).toBe(120)
+      expect(result.data.rows).toBe(40)
+      expect(typeof result.data.cols).toBe("number")
+      expect(typeof result.data.rows).toBe("number")
+    }
+  })
+
+  test("create rejects invalid text for cols/rows", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    expect(init.parameters.safeParse({ action: "create", cols: "abc" }).success).toBe(false)
+    expect(init.parameters.safeParse({ action: "create", rows: "xyz" }).success).toBe(false)
+    expect(init.parameters.safeParse({ action: "create", cols: "" }).success).toBe(false)
+  })
+
+  test("create enforces bounds on cols/rows (min 1, max 1024)", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    expect(init.parameters.safeParse({ action: "create", cols: 0 }).success).toBe(false)
+    expect(init.parameters.safeParse({ action: "create", cols: 1025 }).success).toBe(false)
+    expect(init.parameters.safeParse({ action: "create", rows: 0 }).success).toBe(false)
+    expect(init.parameters.safeParse({ action: "create", rows: 1025 }).success).toBe(false)
+    // Valid bounds
+    expect(init.parameters.safeParse({ action: "create", cols: 1, rows: 1 }).success).toBe(true)
+    expect(init.parameters.safeParse({ action: "create", cols: 1024, rows: 1024 }).success).toBe(true)
+  })
+
+  test("create uses defaults when cols/rows omitted", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    const result = init.parameters.safeParse({ action: "create" })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expectInput(result.data, "create")
+      // Optional fields - they will be undefined, not the defaults (defaults applied in execute)
+      expect(result.data.cols).toBeUndefined()
+      expect(result.data.rows).toBeUndefined()
+    }
+  })
+
+  test("resize accepts numeric cols/rows", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    const result = init.parameters.safeParse({ action: "resize", terminal_id: "st-1", cols: 132, rows: 43 })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expectInput(result.data, "resize")
+      expect(result.data.cols).toBe(132)
+      expect(result.data.rows).toBe(43)
+    }
+  })
+
+  test("resize accepts numeric string cols/rows (coercion)", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    const result = init.parameters.safeParse({ action: "resize", terminal_id: "st-1", cols: "132", rows: "43" })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expectInput(result.data, "resize")
+      expect(result.data.cols).toBe(132)
+      expect(result.data.rows).toBe(43)
+    }
+  })
+
+  test("resize rejects invalid text for cols/rows", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    expect(init.parameters.safeParse({ action: "resize", terminal_id: "st-1", cols: "abc" }).success).toBe(false)
+    expect(init.parameters.safeParse({ action: "resize", terminal_id: "st-1", rows: "xyz" }).success).toBe(false)
+  })
+
+  test("resize enforces bounds on cols/rows", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    expect(init.parameters.safeParse({ action: "resize", terminal_id: "st-1", cols: 0 }).success).toBe(false)
+    expect(init.parameters.safeParse({ action: "resize", terminal_id: "st-1", cols: 1025 }).success).toBe(false)
   })
 })
 
@@ -784,5 +907,297 @@ describe("registry: feature-gated terminal tool", () => {
     for (const id of ["bash", "read", "edit", "write", "glob", "grep", "task", "invalid"]) {
       expect(list).toContain(id)
     }
+  })
+})
+
+// =============================================================================
+// Provider boundary: numeric-argument string normalization (write revision)
+//
+// Reproduces the live defect where the provider/tool-call adapter serializes
+// `revision: 0` as the string "0", which strict z.number() rejected before
+// execute() reached the production adapter / SharedTerminalService. The fix
+// accepts the canonical non-negative decimal-string form and normalizes it to
+// a JavaScript number prior to execute(), while still rejecting malformed
+// representations. These tests exercise the real tool schema + execute path
+// via the test seam; they do NOT spawn a PTY and do NOT touch the production
+// service accessor.
+// =============================================================================
+
+import { nonNegativeSafeIntegerArg, requireNonNegativeSafeInteger } from "../../src/kilocode/shared-terminal/tool"
+
+describe("terminal tool: provider boundary numeric normalization", () => {
+  test("nonNegativeSafeIntegerArg accepts native number and canonical decimal string", async () => {
+    const s = nonNegativeSafeIntegerArg()
+    for (const ok of [0, 1, Number.MAX_SAFE_INTEGER, "0", "1", String(Number.MAX_SAFE_INTEGER)]) {
+      const r = s.safeParse(ok)
+      expect(r.success).toBe(true)
+      if (r.success) {
+        expect(typeof r.data).toBe("number")
+        expect(Number.isInteger(r.data)).toBe(true)
+        expect(r.data).toBeGreaterThanOrEqual(0)
+        expect(r.data).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER)
+      }
+    }
+  })
+
+  test("nonNegativeSafeIntegerArg rejects malformed numeric strings", async () => {
+    const s = nonNegativeSafeIntegerArg()
+    const bad = [
+      -1,
+      "-1",
+      "1.5",
+      "1e3",
+      " 1 ",
+      "",
+      "0x10",
+      Number.NaN,
+      "NaN",
+      Number.POSITIVE_INFINITY,
+      "Infinity",
+      String(Number.MAX_SAFE_INTEGER + 1),
+      "01",
+      "+1",
+      "1.0",
+    ]
+    for (const v of bad) {
+      expect(s.safeParse(v).success).toBe(false)
+    }
+  })
+
+  test('write schema accepts provider-serialized revision "0" and normalizes to number 0', async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    const r = init.parameters.safeParse({
+      action: "write",
+      terminal_id: "st-1",
+      lease_id: "lease-1",
+      revision: "0",
+      data: "echo AGENT_SHARED_OK_7294\r",
+    })
+    expect(r.success).toBe(true)
+    if (r.success) {
+      const d = r.data as { revision: unknown; data: string }
+      expect(typeof d.revision).toBe("number")
+      expect(d.revision).toBe(0)
+      expect(d.data.endsWith("\r")).toBe(true)
+    }
+  })
+
+  test("write schema still preserves native numeric revision: 0", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    const r = init.parameters.safeParse({
+      action: "write",
+      terminal_id: "st-1",
+      lease_id: "lease-1",
+      revision: 0,
+      data: "x",
+    })
+    expect(r.success).toBe(true)
+    if (r.success) {
+      const d = r.data as { revision: unknown }
+      expect(typeof d.revision).toBe("number")
+      expect(d.revision).toBe(0)
+    }
+  })
+
+  test('write execute path reaches the production adapter exactly once with revision 0 when provider supplies "0"', async () => {
+    const { seam, calls } = makeSeam()
+    const r = (
+      await run(seam, makeCtx(), {
+        action: "write",
+        terminal_id: "st-1",
+        lease_id: "lease-1",
+        revision: "0",
+        data: "echo AGENT_SHARED_OK_7294\r",
+      })
+    ).output
+    const parsed = JSON.parse(r)
+    expect(parsed.action).toBe("write")
+    expect(parsed.success).toBe(true)
+    expect(parsed.revision).toBe(1)
+    const writes = calls.filter((c) => c.method === "writeAgent")
+    expect(writes.length).toBe(1)
+    expect(writes[0]!.args.revision).toBe(0)
+    expect(typeof writes[0]!.args.revision).toBe("number")
+    // No new terminal created: createShellOnly never invoked by write.
+    expect(calls.some((c) => c.method === "createShellOnly")).toBe(false)
+  })
+
+  test("release/interrupt also accept canonical decimal-string revision through execute", async () => {
+    const { seam, calls } = makeSeam()
+    await run(seam, makeCtx(), {
+      action: "release",
+      terminal_id: "st-1",
+      lease_id: "lease-1",
+      revision: "0",
+    })
+    await run(seam, makeCtx(), {
+      action: "interrupt",
+      terminal_id: "st-1",
+      lease_id: "lease-1",
+      revision: "0",
+    })
+    const rel = calls.find((c) => c.method === "releaseLease")!
+    const int = calls.find((c) => c.method === "interrupt")!
+    expect(rel.args.revision).toBe(0)
+    expect(typeof rel.args.revision).toBe("number")
+    expect(int.args.revision).toBe(0)
+    expect(typeof int.args.revision).toBe("number")
+  })
+
+  test("write schema rejects malformed revision strings at the boundary", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    for (const bad of ["-1", "1.5", "1e3", " 1 ", "", "0x10", "NaN", "Infinity"]) {
+      expect(
+        init.parameters.safeParse({
+          action: "write",
+          terminal_id: "st-1",
+          lease_id: "lease-1",
+          revision: bad,
+          data: "x",
+        }).success,
+      ).toBe(false)
+    }
+  })
+
+  test("read accepts canonical decimal-string cursor and max_bytes through execute", async () => {
+    const { seam, calls } = makeSeam()
+    await run(seam, makeCtx(), {
+      action: "read",
+      terminal_id: "st-1",
+      cursor: "0",
+      max_bytes: "100",
+    })
+    const c = calls.find((m) => m.method === "readAgent")!
+    expect(c.args.cursor).toBe(0)
+    expect(typeof c.args.cursor).toBe("number")
+    expect(c.args.maxBytes).toBe(100)
+    expect(typeof c.args.maxBytes).toBe("number")
+  })
+
+  test("write action description documents raw PTY input and Enter requirement", async () => {
+    const init = await (TerminalTool as Tool.Info).init()
+    // init.description is loaded from tool.txt; the production tool surfaces
+    // this to the model so it appends "\r" / "\n" itself.
+    const desc = (init as { description?: string }).description
+    expect(typeof desc).toBe("string")
+    expect(desc!.length).toBeGreaterThan(0)
+    expect(desc).toContain("raw")
+    expect(desc).toContain("Enter")
+  })
+
+  // ---------------------------------------------------------------------------
+  // EXECUTE-BOUNDARY NORMALIZATION (the live failure path).
+  //
+  // These tests bypass init.parameters.parse() entirely and call execute()
+  // with the raw provider-shaped args. This is the exact live path: Tool.define
+  // runs `parameters.parse(args)` for validation but discards the Zod transform
+  // output and invokes execute(args) with the ORIGINAL args. So when a provider
+  // serializes revision 0 as the string "0", execute() receives "0". Before
+  // the execute-boundary normalization, the production adapter forwarded that
+  // string straight into SharedTerminalService.writeAgent, whose second
+  // validation layer (LeaseState.validateRevision) rejected it with the live
+  // error string "revision must be a non-negative safe integer" and the write
+  // never reached the PTY. The run() helper used above masks this because it
+  // parses first; runRaw() surfaces it.
+  // ---------------------------------------------------------------------------
+
+  test('requireNonNegativeSafeInteger runtime helper returns numeric 0 for string "0"', () => {
+    const r = requireNonNegativeSafeInteger("0", "revision")
+    expect(typeof r).toBe("number")
+    expect(r).toBe(0)
+  })
+
+  test("requireNonNegativeSafeInteger runtime helper returns native numeric 0 for number 0", () => {
+    const r = requireNonNegativeSafeInteger(0, "revision")
+    expect(typeof r).toBe("number")
+    expect(r).toBe(0)
+  })
+
+  test('write execute with raw provider-shaped revision "0" normalizes and reaches writeAgent once (live path)', async () => {
+    const { seam, calls } = makeSeam()
+    const data = "echo AGENT_SHARED_OK_7294\r"
+    const r = (
+      await runRaw(seam, makeCtx(), {
+        action: "write",
+        terminal_id: "st-1",
+        lease_id: "lease-1",
+        revision: "0",
+        data,
+      })
+    ).output
+    const parsed = JSON.parse(r)
+    expect(parsed.action).toBe("write")
+    expect(parsed.success).toBe(true)
+    const writes = calls.filter((c) => c.method === "writeAgent")
+    expect(writes.length).toBe(1)
+    // writeAgent received a native number, not the provider-shaped string.
+    expect(typeof writes[0]!.args.revision).toBe("number")
+    expect(writes[0]!.args.revision).toBe(0)
+    // data forwarded verbatim, untouched by normalization.
+    expect(writes[0]!.args.dataBytes).toBe(data.length)
+    // No new terminal created: createShellOnly never invoked by write.
+    expect(calls.some((c) => c.method === "createShellOnly")).toBe(false)
+  })
+
+  test("write execute with native numeric revision 0 reaches writeAgent once (live path)", async () => {
+    const { seam, calls } = makeSeam()
+    const r = (
+      await runRaw(seam, makeCtx(), {
+        action: "write",
+        terminal_id: "st-1",
+        lease_id: "lease-1",
+        revision: 0,
+        data: "echo AGENT_SHARED_OK_7294\r",
+      })
+    ).output
+    const parsed = JSON.parse(r)
+    expect(parsed.action).toBe("write")
+    expect(parsed.success).toBe(true)
+    const writes = calls.filter((c) => c.method === "writeAgent")
+    expect(writes.length).toBe(1)
+    expect(typeof writes[0]!.args.revision).toBe("number")
+    expect(writes[0]!.args.revision).toBe(0)
+  })
+
+  test('release/interrupt execute with raw provider-shaped revision "0" normalize at the boundary (live path)', async () => {
+    const { seam, calls } = makeSeam()
+    await runRaw(seam, makeCtx(), {
+      action: "release",
+      terminal_id: "st-1",
+      lease_id: "lease-1",
+      revision: "0",
+    })
+    await runRaw(seam, makeCtx(), {
+      action: "interrupt",
+      terminal_id: "st-1",
+      lease_id: "lease-1",
+      revision: "0",
+    })
+    const rel = calls.find((c) => c.method === "releaseLease")!
+    const int = calls.find((c) => c.method === "interrupt")!
+    expect(typeof rel.args.revision).toBe("number")
+    expect(rel.args.revision).toBe(0)
+    expect(typeof int.args.revision).toBe("number")
+    expect(int.args.revision).toBe(0)
+  })
+
+  test('regression: live error string is NOT returned for raw revision "0" through execute (write)', async () => {
+    const { seam } = makeSeam()
+    const r = (
+      await runRaw(seam, makeCtx(), {
+        action: "write",
+        terminal_id: "st-1",
+        lease_id: "lease-1",
+        revision: "0",
+        data: "echo AGENT_SHARED_OK_7294\r",
+      })
+    ).output
+    // The live second validator (LeaseState.validateRevision) previously threw
+    // "revision must be a non-negative safe integer" before the write reached
+    // the PTY. The execute-boundary normalization must prevent that string from
+    // ever surfacing for the canonical decimal "0".
+    expect(r).not.toContain("revision must be a non-negative safe integer")
+    const parsed = JSON.parse(r)
+    expect(parsed.success).toBe(true)
   })
 })

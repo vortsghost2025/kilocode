@@ -19,12 +19,53 @@ import { TuiConfig } from "@/config/tui"
 import { Instance } from "@/project/instance"
 import { importCloudSession, validateCloudFork } from "@/kilocode/cloud-session" // kilocode_change
 import { writeHeapSnapshot } from "v8"
+import { launchWindow, buildSourceAttachInvocation } from "@/kilocode/shared-terminal/window" // kilocode_change
+import type { TuiTerminalClient, TuiTerminalEvent } from "@/kilocode/shared-terminal/tui" // kilocode_change
+import { SharedTerminalDebug } from "@/kilocode/shared-terminal/debug" // kilocode_change
 
 declare global {
   const KILO_WORKER_PATH: string // kilocode_change
 }
 
 type RpcClient = ReturnType<typeof Rpc.client<typeof rpc>>
+
+// kilocode_change start
+function terminalClient(client: RpcClient): TuiTerminalClient {
+  const data = <T>(result: { ok: true; data: T } | { ok: false; message: string }): T => {
+    if (!result.ok) throw new Error(result.message)
+    return result.data
+  }
+  const done = (result: { ok: true } | { ok: false; message: string }): void => {
+    if (!result.ok) throw new Error(result.message)
+  }
+  return {
+    open: async (input) => data(await client.call("sharedTerminalPanelOpen", input)),
+    detach: async (input) => done(await client.call("sharedTerminalPanelDetach", input)),
+    write: async (input) => {
+      SharedTerminalDebug.traceSubmit("thread_rpc_invoked", input.data, { attachmentID: input.attachmentID })
+      const result = await client.call("sharedTerminalPanelWrite", input)
+      if (!result.ok) {
+        SharedTerminalDebug.traceSubmit("thread_rpc_result", input.data, {
+          attachmentID: input.attachmentID,
+          errorCode: "rpc_rejected",
+        })
+        return data(result)
+      }
+      const value = await result.data
+      SharedTerminalDebug.traceSubmit("thread_rpc_result", input.data, {
+        attachmentID: value.attachmentID,
+        terminalID: value.terminalID,
+        generation: value.generation,
+        status: value.status,
+      })
+      return value
+    },
+    resize: async (input) => data(await client.call("sharedTerminalPanelResize", input)),
+    terminate: async (input) => done(await client.call("sharedTerminalPanelTerminate", input)),
+    subscribe: (handler) => client.on<TuiTerminalEvent>("shared-terminal.event", handler),
+  }
+}
+// kilocode_change end
 
 function createWorkerFetch(client: RpcClient): typeof fetch {
   const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -149,6 +190,7 @@ export const TuiThreadCommand = cmd({
       }
       const cwd = Filesystem.resolve(process.cwd())
 
+      await SharedTerminalDebug.reset() // kilocode_change
       const worker = new Worker(file, {
         env: Object.fromEntries(
           Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -305,11 +347,65 @@ export const TuiThreadCommand = cmd({
 
         await tui({
           url: transport.url,
+          terminal: terminalClient(client), // kilocode_change
           async onSnapshot() {
             const tui = writeHeapSnapshot("tui.heapsnapshot")
             const server = await client.call("snapshot", undefined)
             return [tui, server]
           },
+          // kilocode_change start - shared-terminal on-demand attached window
+          async onSharedTerminal(input: { sessionID: string; directory: string }) {
+            try {
+              const info = (await client.call("sharedTerminalOpen", {
+                sessionID: input.sessionID,
+                directory: input.directory,
+              })) as {
+                url: string
+                terminalID: string
+                generation: number
+                ticket: string
+                cols: number
+                rows: number
+              }
+              // Build a source-attach invocation that re-enters THIS source
+              // build of the Kilo CLI:
+              //   bun run --conditions=browser <script> shared-terminal <url> <id>
+              // process.execPath is bun's own path; process.argv[1] is the
+              // entry script (e.g. src/index.ts). buildSourceAttachInvocation
+              // returns {file, args} which launchWindow passes to `wt new-tab
+              // <file> <args...>`.
+              const script = process.argv[1] ?? "src/index.ts"
+              const inv = buildSourceAttachInvocation({
+                scriptPath: script,
+                url: info.url,
+                terminalID: info.terminalID,
+                cols: info.cols,
+                rows: info.rows,
+              })
+              const r = await launchWindow({
+                file: inv.file,
+                args: inv.args,
+                env: { KILO_SHARED_TERMINAL_TICKET: info.ticket },
+                cols: info.cols,
+                rows: info.rows,
+              })
+              if (!r.ok) {
+                // Window launch failed AFTER the worker created a PTY and
+                // issued a ticket. Revoke the ticket and dispose the
+                // terminal so no orphan attachment is left behind.
+                await client
+                  .call("sharedTerminalClose", {
+                    terminalID: info.terminalID,
+                    generation: info.generation,
+                  })
+                  .catch(() => {})
+              }
+              return r
+            } catch (err) {
+              return { ok: false as const, message: String(err) }
+            }
+          },
+          // kilocode_change end
           config,
           directory: cwd,
           fetch: transport.fetch,

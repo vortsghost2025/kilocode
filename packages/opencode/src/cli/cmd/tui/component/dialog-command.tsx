@@ -13,6 +13,8 @@ import {
 } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import { useKeybind } from "@tui/context/keybind"
+import { SharedTerminalDebug } from "@/kilocode/shared-terminal/debug" // kilocode_change
+import { dispatchActiveTerminalKey, type TuiTerminalState } from "@/kilocode/shared-terminal/tui" // kilocode_change
 
 type Context = ReturnType<typeof init>
 const ctx = createContext<Context>()
@@ -31,9 +33,11 @@ export type CommandOption = DialogSelectOption<string> & {
 }
 
 function init() {
+  SharedTerminalDebug.count("CommandProvider.init") // kilocode_change
   const root = getOwner()
   const [registrations, setRegistrations] = createSignal<Accessor<CommandOption[]>[]>([])
   const [suspendCount, setSuspendCount] = createSignal(0)
+  const [terminal, setTerminal] = createSignal<TuiTerminalState>() // kilocode_change
   const dialog = useDialog()
   const keybind = useKeybind()
 
@@ -61,6 +65,9 @@ function init() {
   const suspended = () => suspendCount() > 0
 
   useKeyboard((evt) => {
+    SharedTerminalDebug.count("CommandProvider.keyboard_handler") // kilocode_change
+    SharedTerminalDebug.traceKey("global_keyboard_handler", evt) // kilocode_change
+    if (terminal() && dispatchActiveTerminalKey(evt, terminal()!)) return // kilocode_change
     if (suspended()) return
     if (dialog.stack.length > 0) return
     for (const option of entries()) {
@@ -99,6 +106,16 @@ function init() {
       setSuspendCount((count) => count + (enabled ? -1 : 1))
     },
     suspended,
+    // kilocode_change start - session terminal owns special keys before prompt command bindings
+    input(value: TuiTerminalState) {
+      SharedTerminalDebug.count("CommandProvider.input_call") // kilocode_change
+      setTerminal(value)
+      return () => {
+        SharedTerminalDebug.count("CommandProvider.input_cleanup") // kilocode_change
+        setTerminal((current) => (current === value ? undefined : current))
+      }
+    },
+    // kilocode_change end
     show() {
       dialog.replace(() => <DialogCommand options={visibleOptions()} suggestedOptions={suggestedOptions()} />)
     },

@@ -296,7 +296,7 @@ export class OutputRing {
       truncated: truncated || gap,
       privateBytes,
       eof: next >= retainedEnd,
-      text: "",
+      text: new TextDecoder().decode(bytes),
       bytes,
       gap,
       gapStart,

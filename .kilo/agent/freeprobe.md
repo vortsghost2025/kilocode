@@ -1,7 +1,7 @@
 ---
 description: Temporary OpenRouter free-router probe agent for testing model/tool behavior.
 mode: subagent
-model: openrouter/tencent/hy3:free
+model: nvidia/minimaxai/minimax-m3
 permission:
   "*": deny
   read: allow

@@ -24,8 +24,8 @@ import stripAnsi from "strip-ansi"
 import { Tool } from "../../tool/tool"
 import { SharedTerminalSchema as S } from "./schema"
 import { Instance } from "../../project/instance"
-import { Shell } from "../../shell/shell"
 import { SharedTerminalService } from "./service"
+import { SessionTerminal } from "./session"
 import DESCRIPTION from "./tool.txt"
 
 // Trusted caller context derived from runtime state. None of these fields come
@@ -78,6 +78,7 @@ export interface TerminalToolService {
     title: string
     cols: number
     rows: number
+    accessSessions: string[]
   }): Promise<{ info: S.Info; ref: ToolTerminalRef }>
   readAgent(input: { ref: ToolTerminalRef; sessionID: string; cursor: number; maxBytes: number }): Promise<S.ReadResult>
   acquireLease(input: {
@@ -115,7 +116,66 @@ export interface TerminalToolService {
 
 // ---- Strict action union schema -------------------------------------------------
 
-const safeInt = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+// kilocode_change start - provider/tool-call adapter serializes numeric tool
+// arguments as strings at the boundary (e.g. revision 0 -> "0"). Strict
+// z.number() rejects the canonical decimal string form before execute() runs,
+// so writes never reach the PTY. nonNegativeSafeIntegerArg accepts either the
+// native number or its canonical non-negative decimal-string representation,
+// normalizes to a JavaScript number, then re-validates as a safe integer. It
+// deliberately does NOT use z.coerce.number(): that would accept malformed or
+// ambiguous representations (exponents, hex, whitespace, fractions, Infinity,
+// NaN). Only "0" or a non-zero digit followed by digits, up to
+// Number.MAX_SAFE_INTEGER, is accepted.
+const CANON_NON_NEG_DECIMAL = /^(0|[1-9][0-9]*)$/
+
+export function nonNegativeSafeIntegerArg() {
+  return z
+    .union([z.number(), z.string().regex(CANON_NON_NEG_DECIMAL)])
+    .transform((v) => (typeof v === "string" ? Number(v) : v))
+    .pipe(z.number().int().min(0).max(Number.MAX_SAFE_INTEGER))
+}
+
+// Dimension schema: accepts finite integers or digit-only numeric strings.
+// Rejects empty string, whitespace, decimals, NaN, Infinity, negatives, and out-of-bounds.
+const dimension = z
+  .union([z.number().int().nonnegative().finite(), z.string().trim().regex(/^\d+$/)])
+  .transform((v) => (typeof v === "string" ? parseInt(v, 10) : v))
+  .pipe(z.number().int().min(1).max(1024))
+// kilocode_change end
+
+// kilocode_change start - execute-boundary revision normalization.
+// The tool framework (Tool.define) validates args via `parameters.parse(args)`
+// but discards the Zod transform output and invokes execute() with the ORIGINAL
+// provider-shaped args. So when a provider serializes `revision: 0` as the
+// string "0", the schema's nonNegativeSafeIntegerArg transform accepts it, but
+// the value reaching execute() is still the string "0". The production adapter
+// forwards that string straight into SharedTerminalService.writeAgent, whose
+// second validation layer (LeaseState.validateRevision) rejects non-number
+// revisions with "revision must be a non-negative safe integer" — so the write
+// never reaches the PTY.
+//
+// requireNonNegativeSafeInteger is the runtime sibling of the schema normalizer.
+// It is called inside execute() BEFORE any ACL construction, adapter call, or
+// service call so the normalized number is the sole value forwarded downstream.
+// It accepts exactly the same forms the schema accepts (native number or its
+// canonical non-negative decimal string) and rejects the same malformed forms
+// (negatives, decimals, exponents, whitespace, hex, leading-zero "01", empty,
+// NaN, Infinity, > MAX_SAFE_INTEGER), guaranteeing schema/runtime parity even
+// when the framework drops the Zod transform result.
+export function requireNonNegativeSafeInteger(value: unknown, field: string): number {
+  if (typeof value === "number") {
+    if (Number.isFinite(value) && Number.isInteger(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER) {
+      return value
+    }
+  } else if (typeof value === "string") {
+    if (CANON_NON_NEG_DECIMAL.test(value)) {
+      const n = Number(value)
+      if (Number.isInteger(n) && n >= 0 && n <= Number.MAX_SAFE_INTEGER) return n
+    }
+  }
+  throw new Error(`${field} must be a non-negative safe integer`)
+}
+// kilocode_change end
 
 const Input = z.discriminatedUnion("action", [
   z.object({ action: z.literal("list") }).strict(),
@@ -123,18 +183,23 @@ const Input = z.discriminatedUnion("action", [
     .object({
       action: z.literal("create"),
       title: z.string().min(1).max(256).optional(),
-      cols: safeInt.min(1).max(1024).optional(),
-      rows: safeInt.min(1).max(1024).optional(),
+      cols: dimension.optional(),
+      rows: dimension.optional(),
     })
     .strict(),
   z
     .object({
       action: z.literal("read"),
       terminal_id: z.string().min(1).max(128),
-      cursor: safeInt.optional(),
-      max_bytes: safeInt
-        .min(1)
-        .max(S.LIMITS.READ_MAX_BYTES * 4)
+      cursor: nonNegativeSafeIntegerArg().optional(),
+      max_bytes: nonNegativeSafeIntegerArg()
+        .pipe(
+          z
+            .number()
+            .int()
+            .min(1)
+            .max(S.LIMITS.READ_MAX_BYTES * 4),
+        )
         .optional(),
     })
     .strict(),
@@ -149,7 +214,7 @@ const Input = z.discriminatedUnion("action", [
       action: z.literal("release"),
       terminal_id: z.string().min(1).max(128),
       lease_id: z.string().min(1).max(128),
-      revision: safeInt,
+      revision: nonNegativeSafeIntegerArg(),
     })
     .strict(),
   z
@@ -157,7 +222,7 @@ const Input = z.discriminatedUnion("action", [
       action: z.literal("write"),
       terminal_id: z.string().min(1).max(128),
       lease_id: z.string().min(1).max(128),
-      revision: safeInt,
+      revision: nonNegativeSafeIntegerArg(),
       // Coarse schema-level cap on JS string length; the tool re-validates the
       // UTF-8 encoded byte length inside execute before any service call.
       data: z.string().max(S.LIMITS.WRITE_MAX_BYTES * 4),
@@ -167,8 +232,8 @@ const Input = z.discriminatedUnion("action", [
     .object({
       action: z.literal("resize"),
       terminal_id: z.string().min(1).max(128),
-      cols: safeInt.min(1).max(1024),
-      rows: safeInt.min(1).max(1024),
+      cols: dimension,
+      rows: dimension,
     })
     .strict(),
   z
@@ -176,7 +241,7 @@ const Input = z.discriminatedUnion("action", [
       action: z.literal("interrupt"),
       terminal_id: z.string().min(1).max(128),
       lease_id: z.string().min(1).max(128),
-      revision: safeInt,
+      revision: nonNegativeSafeIntegerArg(),
     })
     .strict(),
   z
@@ -263,19 +328,56 @@ function actor(ctx: TerminalToolContext): Extract<S.Actor, { type: "agent" }> {
 let testSeam: TerminalToolService | undefined
 let testCtx: TerminalToolContext | undefined
 
+// kilocode_change start - trusted-session resolution must never silently
+// default sessionID to "". A missing trusted session is a hard contract
+// failure; returning a sentinel would let list/info silently drop every
+// TUI-created terminal and let create spawn a second PTY. The live Tool.Context
+// populates sessionID/agent/callID at execute() time; the static production
+// context here only supplies the projectID + directory that never change
+// across one tool invocation.
 function resolveContext(): TerminalToolContext {
   if (testCtx) return testCtx
-  // Production: derive from canonical runtime state. sessionID/agent/callID are
-  // filled from the live Tool.Context at execute() time, not here.
   return {
     projectID: Instance.project.id,
-    sessionID: "",
+    sessionID: "", // filled from live Tool.Context in execute()
     agent: "",
     callID: "",
     directory: Instance.directory,
     now: () => Date.now(),
   }
 }
+
+// Typed denial envelope emitted when the trusted Tool.Context genuinely has
+// no session ID. Distinct from ACL denial so the failure is diagnosable as a
+// tool-context plumbing bug rather than an access decision.
+function trustedContextDenied(action: string): {
+  title: string
+  metadata: Record<string, unknown>
+  output: string
+} {
+  const env = {
+    action,
+    success: false,
+    code: "trusted_context_missing",
+    message: "terminal tool executed without a trusted session context",
+  }
+  return {
+    title: `terminal ${action}`,
+    metadata: { truncated: false, ...env },
+    output: JSON.stringify(env),
+  }
+}
+
+// Guarantee one non-empty trusted session ID for every mutating/inspection
+// action. The model never supplies this value; it comes from the live
+// Tool.Context. An empty/missing ID cannot discover the TUI terminal and
+// could trigger a second PTY, so we fail closed instead.
+function requireTrustedSessionID(ctx: TerminalToolContext): string | undefined {
+  const id = ctx.sessionID
+  if (!id || id.length === 0) return undefined
+  return id
+}
+// kilocode_change end
 
 async function resolveSeam(): Promise<TerminalServiceHandle> {
   if (testSeam) return { seam: testSeam, ctx: testCtx as TerminalToolContext }
@@ -291,9 +393,7 @@ interface TerminalServiceHandle {
 // Production service access. Lives behind a lazy getter so the module never
 // constructs a SharedTerminalService at import time (no process spawn on
 // registry load).
-let cachedProd: SharedTerminalService.Instance | undefined
 async function getProductionService(): Promise<SharedTerminalService.Instance> {
-  if (cachedProd) return cachedProd
   // The production SharedTerminalService Instance is created and scoped per
   // project by ST-04's wiring; the tool does not construct it. We import the
   // instance accessor lazily to avoid registering any side effect at module
@@ -304,8 +404,7 @@ async function getProductionService(): Promise<SharedTerminalService.Instance> {
   if (!mod.getSharedTerminalInstance) {
     throw S.SharedTerminalError.create("terminal_missing", { message: "shared-terminal service not available" })
   }
-  cachedProd = await mod.getSharedTerminalInstance()
-  return cachedProd
+  return mod.getSharedTerminalInstance()
 }
 
 // Production adapter wrapping the accepted SharedTerminalService.Instance. The
@@ -321,12 +420,12 @@ function makeProductionAdapter(svc: SharedTerminalService.Instance): TerminalToo
       return all.filter((i) => i.access.sessions.includes(input.sessionID) && i.access.agent !== "none")
     },
     async createShellOnly(input) {
-      const shell = await Shell.preferred()
-      const r = await svc.create({
-        file: shell,
-        args: [],
-        scope: { projectID: input.projectID, directory: input.directory, worktree: Instance.worktree },
-        createdBy: input.actor,
+      const r = await SessionTerminal.ensure({
+        sessionID: input.sessionID,
+        projectID: input.projectID,
+        directory: input.directory,
+        worktree: Instance.worktree,
+        actor: input.actor,
         title: input.title || "shared",
         cols: input.cols || 80,
         rows: input.rows || 24,
@@ -344,14 +443,12 @@ function makeProductionAdapter(svc: SharedTerminalService.Instance): TerminalToo
       })
     },
     async releaseLease(input) {
-      // The accepted ST-04 service exposes acquire/refresh/validate but no
-      // standalone release primitive. The tool's release contract is honored
-      // via the service's lease.validate path: a stale/foreign handle fails
-      // closed there. We deliberately do NOT reimplement LeaseState here.
-      // Because no primitive exists, the production adapter returns a bounded
-      // success-with-acknowledgement result without mutating state; tests
-      // inject a seam that proves lease-handle fail-closed semantics.
-      void input
+      await svc.releaseLease(input.ref.terminalID, {
+        ref: serviceRef(input.ref),
+        leaseID: input.leaseID,
+        actor: input.actor,
+        revision: input.revision,
+      })
       return { action: "release", success: true, terminalID: input.ref.terminalID }
     },
     async writeAgent(input) {
@@ -364,7 +461,7 @@ function makeProductionAdapter(svc: SharedTerminalService.Instance): TerminalToo
       }
       // Service performs final lease/generation/private-mode validation. The
       // write is committed only on success; otherwise the service throws.
-      await svc.writeAgent(input.ref.terminalID, {
+      const lease = await svc.writeAgent(input.ref.terminalID, {
         ref: serviceRef(input.ref),
         leaseID: input.leaseID,
         revision: input.revision,
@@ -372,9 +469,7 @@ function makeProductionAdapter(svc: SharedTerminalService.Instance): TerminalToo
         data: input.data,
         now: now(),
       })
-      // Reflect the next lease revision as input.revision + 1 (deterministic
-      // contract); the service increments lease revision on a valid write.
-      return { action: "write", success: true, terminalID: input.ref.terminalID, revision: input.revision + 1 }
+      return { action: "write", success: true, terminalID: input.ref.terminalID, revision: lease.revision }
     },
     async resize(input) {
       await svc.resize(input.ref.terminalID, serviceRef(input.ref), input.cols, input.rows)
@@ -392,6 +487,7 @@ function makeProductionAdapter(svc: SharedTerminalService.Instance): TerminalToo
     },
     async terminate(input) {
       await svc.terminate(input.ref.terminalID, serviceRef(input.ref))
+      SessionTerminal.forget(input.sessionID, input.ref.terminalID, input.ref.generation)
       return { action: "terminate", success: true, terminalID: input.ref.terminalID }
     },
   }
@@ -437,6 +533,14 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
           directory: handle.ctx.directory,
           now: handle.ctx.now ? handle.ctx.now : () => Date.now(),
         }
+        // kilocode_change start - trusted session binding. The model never
+        // supplies sessionID; it must come from the live Tool.Context. A
+        // missing trusted session fails closed before any service call so we
+        // never silently drop every TUI-created terminal and never spawn a
+        // second PTY from a sentinel "" id.
+        const trustedSession = requireTrustedSessionID(live)
+        if (!trustedSession) return trustedContextDenied(args.action)
+        // kilocode_change end
         switch (args.action) {
           case "list": {
             await ctx.ask({
@@ -447,9 +551,9 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
             })
             const infos = await handle.seam.listAccessibleSessions({
               projectID: live.projectID,
-              sessionID: live.sessionID,
+              sessionID: trustedSession,
             })
-            const visible = infos.filter((i) => i.access.sessions.includes(live.sessionID) && i.access.agent !== "none")
+            const visible = infos.filter((i) => i.access.sessions.includes(trustedSession) && i.access.agent !== "none")
             const env = {
               action: "list",
               success: true,
@@ -463,6 +567,44 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
             }
           }
           case "create": {
+            // kilocode_change start - never spawn a second PTY when a TUI
+            // terminal already exists for the trusted session. Reuse it and
+            // return its existing terminalID/generation. This is the single
+            // backing PTY guarantee: human TUI and agent share one terminal.
+            // Skip the lookup on the test-injected seam path: those tests
+            // model create in isolation and have no live Instance, so
+            // SessionTerminal.current would throw on the missing context.
+            if (!testSeam) {
+              const existing = SessionTerminal.current(trustedSession)
+              if (existing) {
+                const env = {
+                  action: "create",
+                  success: true,
+                  terminalID: existing.info.id,
+                  generation: existing.info.generation,
+                  terminal: {
+                    id: existing.info.id,
+                    generation: existing.info.generation,
+                    cols: existing.info.cols,
+                    rows: existing.info.rows,
+                    lifecycle: existing.info.lifecycle,
+                    access: { agent: existing.info.access.agent, sessions: existing.info.access.sessions },
+                  },
+                }
+                return {
+                  title: `terminal create ${existing.info.id}`,
+                  metadata: {
+                    truncated: false,
+                    action: "create",
+                    success: true,
+                    terminalID: existing.info.id,
+                    generation: existing.info.generation,
+                  },
+                  output: JSON.stringify(env),
+                }
+              }
+            }
+            // kilocode_change end
             await ctx.ask({
               permission: "terminal_create",
               patterns: [live.projectID],
@@ -471,12 +613,13 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
             })
             const r = await handle.seam.createShellOnly({
               projectID: live.projectID,
-              sessionID: live.sessionID,
+              sessionID: trustedSession,
               directory: live.directory,
               actor: actor(live),
               title: args.title ? args.title : "shared",
               cols: args.cols ? args.cols : 80,
               rows: args.rows ? args.rows : 24,
+              accessSessions: [trustedSession],
             })
             const env = {
               action: "create",
@@ -519,7 +662,7 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
                 : S.LIMITS.READ_DEFAULT_BYTES
             const result = await handle.seam.readAgent({
               ref: acl.ref,
-              sessionID: live.sessionID,
+              sessionID: trustedSession,
               cursor: args.cursor !== undefined ? args.cursor : acl.info.start,
               maxBytes,
             })
@@ -569,7 +712,7 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
             const lease = await handle.seam.acquireLease({
               ref: acl.ref,
               actor: actor(live),
-              sessionID: live.sessionID,
+              sessionID: trustedSession,
             })
             const env = {
               action: "lease",
@@ -604,12 +747,18 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
               always: [`${live.projectID}/${args.terminal_id}`],
               metadata: {},
             })
+            // kilocode_change - normalize revision at the execute boundary
+            // BEFORE the adapter/service call. The tool framework does not
+            // preserve the Zod transform output, so args.revision may still be
+            // the provider-shaped string "0"; the service's second validation
+            // layer rejects non-number revisions.
+            const revision = requireNonNegativeSafeInteger(args.revision, "revision")
             const r = await handle.seam.releaseLease({
               ref: acl.ref,
               actor: actor(live),
-              sessionID: live.sessionID,
+              sessionID: trustedSession,
               leaseID: args.lease_id,
-              revision: args.revision,
+              revision,
             })
             const env = {
               action: "release",
@@ -646,12 +795,19 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
               always: [`${live.projectID}/${args.terminal_id}`],
               metadata: {},
             })
+            // kilocode_change - normalize revision at the execute boundary
+            // BEFORE the adapter/service call. See the release branch: the tool
+            // framework discards the Zod transform output, so args.revision may
+            // still be the provider-shaped string "0"; forwarding it unmodified
+            // makes the service's second validation layer reject the write
+            // before it reaches the PTY.
+            const revision = requireNonNegativeSafeInteger(args.revision, "revision")
             const r = await handle.seam.writeAgent({
               ref: acl.ref,
               actor: actor(live),
-              sessionID: live.sessionID,
+              sessionID: trustedSession,
               leaseID: args.lease_id,
-              revision: args.revision,
+              revision,
               data: args.data,
             })
             const env = {
@@ -685,7 +841,7 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
             })
             const r = await handle.seam.resize({
               ref: acl.ref,
-              sessionID: live.sessionID,
+              sessionID: trustedSession,
               cols: args.cols,
               rows: args.rows,
             })
@@ -712,12 +868,15 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
               always: [`${live.projectID}/${args.terminal_id}`],
               metadata: {},
             })
+            // kilocode_change - normalize revision at the execute boundary
+            // BEFORE the adapter/service call (same rationale as release/write).
+            const revision = requireNonNegativeSafeInteger(args.revision, "revision")
             const r = await handle.seam.interrupt({
               ref: acl.ref,
               actor: actor(live),
-              sessionID: live.sessionID,
+              sessionID: trustedSession,
               leaseID: args.lease_id,
-              revision: args.revision,
+              revision,
             })
             const env = { action: "interrupt", success: r.success, terminalID: r.terminalID }
             return {
@@ -735,7 +894,7 @@ function defineFor(seam: TerminalToolService | undefined): Tool.Info {
               always: [`${live.projectID}/${args.terminal_id}`],
               metadata: {},
             })
-            const r = await handle.seam.terminate({ ref: acl.ref, sessionID: live.sessionID })
+            const r = await handle.seam.terminate({ ref: acl.ref, sessionID: trustedSession })
             const env = { action: "terminate", success: r.success, terminalID: r.terminalID }
             return {
               title: `terminal terminate ${r.terminalID}`,

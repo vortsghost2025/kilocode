@@ -7,7 +7,6 @@ import { sharedTerminalRuntime } from "../../src/kilocode/shared-terminal/runtim
 import { Instance } from "../../src/project/instance"
 import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { tmpdir } from "../fixture/fixture"
-import type { WebSocket } from "ws"
 
 const isWin = process.platform === "win32"
 const WIN_CMD = process.env.ComSpec || "cmd.exe"
@@ -51,7 +50,7 @@ function makeFakeSpawn(): {
           cbs.push(cb)
           return { dispose: () => {} }
         },
-        onExit: () => {},
+        onExit: () => ({ dispose: () => {} }),
         write: () => {},
         resize: () => {},
         kill: () => {},
@@ -160,10 +159,7 @@ describe("ST-06Q2: Real Bun WebSocket Integration Tests", () => {
     const ctl = clock()
     const audit = new AuditStore({ clock: ctl.now, id: () => "evt-cda", limit: 128 })
     const tickets = new TicketState()
-    const gate = { resolve: () => {} }
-    gate.promise = new Promise<void>((r) => {
-      gate.resolve = r
-    })
+    const gate = Promise.withResolvers<void>()
 
     const fake = makeFakeSpawn()
 
@@ -425,14 +421,16 @@ describe("ST-06Q2: Real Bun WebSocket Integration Tests", () => {
 
       fake.onData("RACE_DATA\n")
 
-      const [msg1, r1, msg2, r2] = await Promise.all([
+      const results = await Promise.all([
         waitForMessage(ws1, 10000)
           .then((m) => [m, 1] as const)
           .catch(() => [null, 1] as const),
         waitForMessage(ws2, 10000)
           .then((m) => [m, 2] as const)
           .catch(() => [null, 2] as const),
-      ]).then((r) => r.flat())
+      ])
+      const msg1 = results[0][0]
+      const msg2 = results[1][0]
 
       const winnerMsg = msg1 ?? msg2
       const isWs1Winner = msg1 !== null

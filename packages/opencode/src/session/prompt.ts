@@ -6,6 +6,8 @@ import { ForegroundTask } from "@/kilocode/foreground-task" // kilocode_change
 import { ToolAsk } from "@/kilocode/permission/tool-ask" // kilocode_change
 import { CapabilityAuthority } from "@/kilocode/capability/authority" // kilocode_change
 import { AuthorityStore } from "@/kilocode/capability/authority-store" // kilocode_change
+import { TerminalObservationRouter } from "@/kilocode/session/observation-router" // kilocode_change
+import { TerminalObservation } from "@/kilocode/shared-terminal/observation" // kilocode_change
 import z from "zod"
 import { Filesystem } from "../util/filesystem"
 import { SessionID, MessageID, PartID } from "./schema"
@@ -774,6 +776,54 @@ export namespace SessionPrompt {
 
       // kilocode_change — ephemerally inject dynamic editor context into last user message
       KiloSessionPrompt.injectEditorContext({ msgs, lastUser, sessionID, cache: envCache })
+
+      // kilocode_change start - inject pending terminal observations into the
+      // last user message as a synthetic TextPart. This is the delivery point
+      // for automatic same-session terminal visibility.
+      //
+      // Semantics:
+      //   * Active agent run: drained here before each reasoning/tool step,
+      //     so the observation is available before the next model call.
+      //   * Idle agent: nothing runs here until the next normal turn starts.
+      //     The queue simply holds the observation; no model turn is started
+      //     by this code (no prompt/loop invocation, no streamText). The next
+      //     user or agent turn drains it.
+      //   * The TextPart is NOT persisted (ephemeral injection into the in-
+      //     memory `msgs` array), so it never becomes a permanent human
+      //     instruction in the session history. It is clearly marked as
+      //     terminal observation / untrusted external data.
+      //   * Dedup is enforced at enqueue (TerminalObservationQueue) and by
+      //     the capture engine (one observation per cursor range), so a
+      //     repeat injection across loop iterations is avoided once the
+      //     queue is drained.
+      {
+        const obs = TerminalObservationRouter.drain(sessionID)
+        if (obs.length > 0) {
+          const block = TerminalObservation.formatManyForContext(obs)
+          if (block.length > 0) {
+            const idx = msgs.findLastIndex((m) => m.info.role === "user")
+            if (idx !== -1) {
+              msgs[idx] = {
+                ...msgs[idx],
+                parts: [
+                  ...msgs[idx].parts,
+                  {
+                    id: PartID.ascending(),
+                    sessionID,
+                    messageID: msgs[idx].info.id,
+                    type: "text",
+                    text: block,
+                    // synthetic: this is not user-authored text. The model
+                    // sees it as observation, not instruction.
+                    synthetic: true,
+                  } satisfies MessageV2.TextPart,
+                ],
+              }
+            }
+          }
+        }
+      }
+      // kilocode_change end
 
       // Build system prompt, adding structured output instruction if needed
       const skills = await SystemPrompt.skills(agent, session.permission, session.id) // kilocode_change

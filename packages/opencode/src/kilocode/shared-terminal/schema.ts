@@ -308,6 +308,7 @@ export const LIMITS = SharedTerminalSchema.LIMITS
 export const Offset = SharedTerminalSchema.Offset
 export const TerminalID = SharedTerminalSchema.TerminalID
 export const Actor = SharedTerminalSchema.Actor
+export type Actor = typeof SharedTerminalSchema.Actor.zod._output
 export const Scope = SharedTerminalSchema.Scope
 export const Access = SharedTerminalSchema.Access
 export const Lifecycle = SharedTerminalSchema.Lifecycle

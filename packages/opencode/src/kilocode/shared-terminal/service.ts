@@ -7,6 +7,8 @@ import { Reap } from "./reap"
 import type { Ownership } from "./reap"
 import { AuditStore } from "./audit"
 import { TicketState } from "./ticket"
+import { SharedTerminalDebug } from "./debug"
+import { TerminalObservation } from "./observation"
 import type { IPty } from "bun-pty"
 
 export namespace SharedTerminalService {
@@ -32,6 +34,12 @@ export namespace SharedTerminalService {
     title: string
     cols: number
     rows: number
+    // kilocode_change - per-session ACL. Optional for backward compat. When
+    // omitted, defaults to an empty allowlist (no sessions permitted). When
+    // provided, every submitHuman() against this terminal must include a
+    // sessionID that matches an entry here, and the terminal refuses
+    // attachWithTicket from any sessionID not in the list.
+    accessSessions?: string[]
   }
 
   export interface WriteHumanInput {
@@ -61,6 +69,13 @@ export namespace SharedTerminalService {
     actor: Extract<S.Actor, { type: "agent" }>
     revision: number
     now: number
+  }
+
+  export interface ReleaseLeaseInput {
+    ref: TerminalRef
+    leaseID: string
+    actor: Extract<S.Actor, { type: "agent" }>
+    revision: number
   }
 
   export interface ReadCursorInput {
@@ -182,6 +197,23 @@ export namespace SharedTerminalService {
     // kilocode_change - test-only seam: reads internal service state.
     // Wired up by the service on first create(). Never set by production code.
     _inspectHook?: { attachmentCount?: (terminalID: string) => number }
+    // kilocode_change start - automatic same-session terminal visibility.
+    // When provided, the service constructs a per-terminal
+    // TerminalObservation.Detector on create() and routes human submissions
+    // and output frames to it. Finalized observations are delivered to this
+    // sink. The sink is responsible for routing to the correct session queue
+    // (the service resolves the sessionID from access.sessions[0] and passes
+    // it to the detector). When omitted, no observation capture occurs.
+    observationSink?: (obs: TerminalObservation.Observation) => void
+    // kilocode_change - output quiet window (ms) for the observation
+    // detector. Defaults to TerminalObservation.QUIET_MS. Tests pass a
+    // small value for deterministic, fast finalization.
+    observationQuietMs?: number
+    // kilocode_change - max bytes captured per observation. Defaults to
+    // TerminalObservation.OBSERVATION_MAX_BYTES. Tests pass a small value
+    // for deterministic truncation checks.
+    observationMaxBytes?: number
+    // kilocode_change end
   }
 
   export interface Instance {
@@ -194,7 +226,8 @@ export namespace SharedTerminalService {
     unsubscribe(id: string, cb: (frame: SubscriberFrame) => void): Promise<void>
     acquireLease(id: string, input: AcquireLeaseInput): Promise<S.Lease>
     refreshLease(id: string, input: RefreshLeaseInput): Promise<S.Lease>
-    writeAgent(id: string, input: WriteAgentInput): Promise<void>
+    writeAgent(id: string, input: WriteAgentInput): Promise<S.Lease>
+    releaseLease(id: string, input: ReleaseLeaseInput): Promise<void>
     writeHuman(id: string, input: WriteHumanInput): Promise<void>
     privateMode(id: string, input: PrivateModeInput): Promise<void>
     resize(id: string, ref: TerminalRef, cols: number, rows: number): Promise<void>
@@ -275,6 +308,11 @@ export namespace SharedTerminalService {
       from: "terminate" | "dispose" | "exit" | "rollback",
     ): Promise<void> {
       if (state.cleanupStatus === "cleaned" || state.cleanupStatus === "cleanup_failed") return
+      // kilocode_change start - finalize and dispose the observation detector
+      // before cleanup so a finalized observation (if a capture was open) is
+      // delivered. Safe to call multiple times; second call is a no-op.
+      state.observation?.dispose()
+      // kilocode_change end
       state.cleanupStatus = "cleaning"
       state.info.cleanup = "cleaning"
 
@@ -471,6 +509,21 @@ export namespace SharedTerminalService {
             att.callbacks.onError(e)
           }
         }
+        // kilocode_change start - feed this output frame to the terminal
+        // observation detector (when enabled). The detector only accumulates
+        // while a human-originated capture is open; agent writes do not open a
+        // capture, so this is not a recursion path. The combined bytes here
+        // are the raw UTF-8 bytes of this PTY output frame, and cursor is the
+        // absolute byte offset after appending.
+        if (state.observation) {
+          try {
+            state.observation.onOutputFrame({ cursor, frameBytes: combined, now: clock() })
+          } catch {
+            // Observation capture must never affect terminal I/O. Swallow
+            // detector errors so a capture bug cannot break the PTY.
+          }
+        }
+        // kilocode_change end
       }
     }
 
@@ -602,7 +655,11 @@ export namespace SharedTerminalService {
           shell: input.file,
           pid: 0,
           scope,
-          access: { human: "read-write", agent: "read-write", sessions: [] },
+          access: {
+            human: "read-write",
+            agent: "read-write",
+            sessions: input.accessSessions ? [...input.accessSessions] : [],
+          },
           lifecycle: "starting",
           cleanup: "pending",
           cols: input.cols,
@@ -619,6 +676,30 @@ export namespace SharedTerminalService {
         const leaseState = new LeaseState()
         const subs = new Map<symbol, SharedTerminalService.SubscriberOpts>()
         const attachments = new Map<string, SharedTerminalService.Attachment>()
+        // kilocode_change start - construct the per-terminal observation
+        // detector when automatic visibility is enabled. The sessionID is
+        // resolved from the terminal's access.sessions list: a session-bound
+        // terminal has exactly one entry. We capture it now so the detector
+        // does not need to re-resolve on every frame.
+        const obsSessionID =
+          input.accessSessions && input.accessSessions.length > 0 ? input.accessSessions[0] : undefined
+        const observation =
+          opts.observationSink && obsSessionID
+            ? new TerminalObservation.Detector({
+                clock,
+                quietMs: opts.observationQuietMs,
+                maxBytes: opts.observationMaxBytes,
+                emit: (obs) => {
+                  // Recursion prevention: the detector is fed ONLY by the
+                  // human submit path (onHumanSubmit) and the shared output
+                  // path (onOutputFrame). Agent writes go through writeAgent,
+                  // which does not call the detector. So an emitted
+                  // observation is always human-originated by construction.
+                  opts.observationSink!(obs)
+                },
+              })
+            : undefined
+        // kilocode_change end
         const state: TerminalState = {
           id,
           generation,
@@ -640,6 +721,7 @@ export namespace SharedTerminalService {
           cleanupStatus: "pending",
           generationBumped: false,
           pendingFlushVisibility: undefined,
+          observation,
         }
 
         // Provisional state: build everything but do NOT insert into the live
@@ -873,6 +955,54 @@ export namespace SharedTerminalService {
         })
       },
 
+      async releaseLease(id, input) {
+        const s = getState(id)
+        return enqueue(s, () => {
+          validateRef(s, input.ref)
+          if (isDisposed(s)) {
+            makeAuditRecord(s, {
+              action: "lease.release",
+              outcome: "rejected",
+              actor: input.actor,
+              correlationID: input.leaseID,
+              reason: "instance_dispose",
+            })
+            throw S.SharedTerminalError.create("terminal_disposed", { message: "terminal is disposed", terminalID: id })
+          }
+          try {
+            s.leaseState.release({
+              terminalID: id,
+              generation: s.generation,
+              leaseID: input.leaseID,
+              actor: input.actor,
+              revision: input.revision,
+            })
+            makeAuditRecord(s, {
+              action: "lease.release",
+              outcome: "applied",
+              actor: input.actor,
+              correlationID: input.leaseID,
+            })
+            emitEvent(s, {
+              type: "lease.revoked",
+              terminalID: id,
+              generation: s.generation,
+              leaseID: input.leaseID,
+              reason: "released",
+            })
+          } catch (err) {
+            makeAuditRecord(s, {
+              action: "lease.release",
+              outcome: "rejected",
+              actor: input.actor,
+              correlationID: input.leaseID,
+              reason: leaseRejectReason(err),
+            })
+            throw err
+          }
+        })
+      },
+
       async writeAgent(id, input) {
         const s = getState(id)
         return enqueue(s, () => {
@@ -935,6 +1065,14 @@ export namespace SharedTerminalService {
             actor: input.actor,
             correlationID: input.leaseID,
             bytes: input.data.length,
+          })
+          return s.leaseState.refresh({
+            terminalID: id,
+            generation: s.generation,
+            leaseID: input.leaseID,
+            actor: input.actor,
+            revision: input.revision,
+            now: input.now,
           })
         })
       },
@@ -1188,6 +1326,22 @@ export namespace SharedTerminalService {
                 throw S.SharedTerminalError.create("ticket_invalid", { message: "ticket invalid", terminalID: id })
             }
           }
+          // kilocode_change start — second write-mode attachment is not
+          // allowed. The visible shared-terminal window owns the only human
+          // keyboard. A second concurrent write ticket fails closed here
+          // rather than letting the second client silently shadow the PTY.
+          if (consume.mode === "write") {
+            for (const [, att] of s.attachments) {
+              if (att.closed) continue
+              if (att.mode === "write") {
+                throw S.SharedTerminalError.create("acl_denied", {
+                  message: "a write attachment is already attached",
+                  terminalID: id,
+                })
+              }
+            }
+          }
+          // kilocode_change end
           const attID = nextAttachmentID()
           const att: SharedTerminalService.Attachment = {
             attachmentID: attID,
@@ -1217,20 +1371,65 @@ export namespace SharedTerminalService {
 
       async submitHuman(id, attachmentID, data, now) {
         const s = getState(id)
+        SharedTerminalDebug.traceSubmit("service_submit_human_received", data, {
+          attachmentID,
+          terminalID: id,
+          generation: s.generation,
+          attached: s.attachments.has(attachmentID),
+          status: s.info.lifecycle,
+        })
         return enqueue(s, () => {
           const att = s.attachments.get(attachmentID)
           if (!att || att.closed) {
+            SharedTerminalDebug.traceSubmit("submit_human_result", data, {
+              attachmentID,
+              terminalID: id,
+              generation: s.generation,
+              attached: false,
+              status: s.info.lifecycle,
+              errorCode: "terminal_disposed",
+            })
             throw S.SharedTerminalError.create("terminal_disposed", {
               message: "attachment not found or closed",
               terminalID: id,
             })
           }
+          // kilocode_change start - read mode must never submit keyboard.
+          if (att.mode === "read") {
+            makeAuditRecord(s, {
+              action: "write",
+              outcome: "rejected",
+              actor: { type: "human", clientID: attachmentID },
+              reason: "permission_denied",
+            })
+            SharedTerminalDebug.traceSubmit("submit_human_result", data, {
+              attachmentID,
+              terminalID: id,
+              generation: s.generation,
+              attached: true,
+              status: s.info.lifecycle,
+              errorCode: "permission_denied",
+            })
+            throw S.SharedTerminalError.create("permission_denied", {
+              message: "attachment mode forbids keyboard submission",
+              terminalID: id,
+            })
+          }
+          // kilocode_change end
           if (isDisposed(s)) {
             makeAuditRecord(s, {
               action: "write",
               outcome: "rejected",
               actor: { type: "human", clientID: attachmentID },
               reason: "instance_dispose",
+            })
+            SharedTerminalDebug.traceSubmit("submit_human_result", data, {
+              attachmentID,
+              terminalID: id,
+              generation: s.generation,
+              attached: true,
+              status: s.info.lifecycle,
+              errorCode: "terminal_disposed",
             })
             throw S.SharedTerminalError.create("terminal_disposed", { message: "terminal is disposed", terminalID: id })
           }
@@ -1240,6 +1439,14 @@ export namespace SharedTerminalService {
               outcome: "failed",
               actor: { type: "human", clientID: attachmentID },
               reason: "process_exit",
+            })
+            SharedTerminalDebug.traceSubmit("submit_human_result", data, {
+              attachmentID,
+              terminalID: id,
+              generation: s.generation,
+              attached: true,
+              status: s.info.lifecycle,
+              errorCode: "process_exit",
             })
             throw S.SharedTerminalError.create("terminal_disposed", { message: "process not attached", terminalID: id })
           }
@@ -1261,6 +1468,13 @@ export namespace SharedTerminalService {
             })
           }
           try {
+            SharedTerminalDebug.traceSubmit("pty_write_invoked", data, {
+              attachmentID,
+              terminalID: id,
+              generation: s.generation,
+              attached: true,
+              status: s.info.lifecycle,
+            })
             s.proc.write(data)
           } catch (err) {
             makeAuditRecord(s, {
@@ -1268,6 +1482,14 @@ export namespace SharedTerminalService {
               outcome: "failed",
               actor: { type: "human", clientID: attachmentID },
               reason: "process_exit",
+            })
+            SharedTerminalDebug.traceSubmit("submit_human_result", data, {
+              attachmentID,
+              terminalID: id,
+              generation: s.generation,
+              attached: true,
+              status: s.info.lifecycle,
+              errorCode: SharedTerminalDebug.errorCode(err),
             })
             throw err
           }
@@ -1277,6 +1499,37 @@ export namespace SharedTerminalService {
             actor: { type: "human", clientID: attachmentID },
             bytes: data.length,
           })
+          SharedTerminalDebug.traceSubmit("submit_human_result", data, {
+            attachmentID,
+            terminalID: id,
+            generation: s.generation,
+            attached: true,
+            status: s.info.lifecycle,
+          })
+          // kilocode_change start - feed the human submission to the
+          // terminal observation detector (when enabled). The detector
+          // resolves the trusted sessionID from the terminal's access list.
+          // Only the human submit path feeds the detector, so agent-originated
+          // writes (which go through writeAgent) never open a capture — this
+          // is the recursion-prevention boundary.
+          if (s.observation) {
+            const sid = s.info.access.sessions.length > 0 ? s.info.access.sessions[0] : undefined
+            if (sid) {
+              try {
+                s.observation.onHumanSubmit({
+                  terminalID: id,
+                  generation: s.generation,
+                  sessionID: sid,
+                  command: data,
+                  outputCursor: s.encoder.cursor(),
+                  now: clock(),
+                })
+              } catch {
+                // Observation capture must never affect terminal I/O.
+              }
+            }
+          }
+          // kilocode_change end
         })
       },
 
@@ -1389,6 +1642,10 @@ type TerminalState = {
   cleanupStatus: S.Cleanup
   generationBumped: boolean
   pendingFlushVisibility: "shared" | "human" | undefined
+  // kilocode_change - per-terminal observation detector for automatic
+  // same-session terminal visibility. Undefined when no observationSink is
+  // configured (disabled mode / legacy tests).
+  observation: TerminalObservation.Detector | undefined
 }
 
 function incGeneration(state: TerminalState): void {
@@ -1514,4 +1771,14 @@ function leaseRejectReason(err: unknown): S.AuditReason {
   if (code === "lease_expired") return "lease_expired"
   if (code === "private_mode") return "private_mode"
   return "permission_denied"
+}
+
+// Resolve the production SharedTerminalService.Instance for the current
+// project. The tool uses this to get the canonical service without
+// knowing about the Instance.state plumbing. The runtime is lazily
+// initialized by Instance.state on first access per project directory.
+export async function getSharedTerminalInstance(): Promise<SharedTerminalService.Instance> {
+  const { sharedTerminalRuntime } = await import("./runtime")
+  const rt = sharedTerminalRuntime()
+  return rt.svc
 }

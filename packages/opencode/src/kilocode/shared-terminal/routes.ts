@@ -168,10 +168,32 @@ export function SharedTerminalRoutes(opts: {
       let attachment: SharedTerminalService.Attachment | null = null
       let ready = false
       let closed = false
+      // kilocode_change start — capture ws+raw in closure scope so onMessage
+      // can close the connection (e.g. for pty.detach).
+      let wsRef: { close: () => void } | null = null
+      // kilocode_change end
       const pending: string[] = []
+      // kilocode_change start — pending resize arrived before attachment, or
+      // before ready. Keep ONLY the most-recent requested size so the win goes
+      // to the latest event the human issued (not the oldest). Applied
+      // immediately after attachWithTicket succeeds.
+      let pendingResize: { cols: number; rows: number } | undefined
+      function applyPendingResize(): void {
+        if (!attachment || pendingResize === undefined) return
+        const r = pendingResize
+        try {
+          rt.svc.resizeAttachment(terminalID, attachment.attachmentID, r.cols, r.rows)
+        } catch {}
+        pendingResize = undefined
+      }
+      // kilocode_change end
 
       return {
         async onOpen(_event, ws) {
+          // kilocode_change start — expose ws to onMessage for graceful
+          // pty.detach close.
+          wsRef = ws as unknown as { close: () => void }
+          // kilocode_change end
           const raw = ws.raw
           if (!isRawSocket(raw)) {
             ws.close()
@@ -208,6 +230,10 @@ export function SharedTerminalRoutes(opts: {
             }
             attachment = att
             ready = true
+            // kilocode_change start — apply any resize that arrived before the
+            // attachment became ready, then flush queued stdin.
+            applyPendingResize()
+            // kilocode_change end
             for (const msg of pending) {
               rt.svc.submitHuman(terminalID, att.attachmentID, msg, Date.now())
             }
@@ -218,6 +244,62 @@ export function SharedTerminalRoutes(opts: {
         },
         onMessage(event) {
           if (typeof event.data !== "string") return
+          // kilocode_change start — typed control messages from the attach
+          // client. resize and private and pty.kill are evaluated even before
+          // attach completes so the latest user intent always wins.
+          if (event.data.startsWith("{")) {
+            try {
+              const msg = JSON.parse(event.data)
+              if (
+                msg &&
+                msg.type === "resize" &&
+                typeof msg.cols === "number" &&
+                typeof msg.rows === "number" &&
+                Number.isFinite(msg.cols) &&
+                Number.isFinite(msg.rows) &&
+                msg.cols > 0 &&
+                msg.rows > 0
+              ) {
+                pendingResize = { cols: msg.cols, rows: msg.rows }
+                if (ready && attachment && !closed) applyPendingResize()
+                return
+              }
+              if (msg && msg.type === "private" && typeof msg.active === "boolean") {
+                if (ready && attachment && !closed) {
+                  rt.svc
+                    .setAttachmentPrivate(terminalID, attachment.attachmentID, msg.active, Date.now())
+                    .catch(() => {})
+                }
+                return
+              }
+              if (msg && msg.type === "pty.kill") {
+                if (ready && attachment && !closed) {
+                  const info = rt.svc.info(terminalID)
+                  if (info) {
+                    rt.svc
+                      .terminate(terminalID, {
+                        terminalID,
+                        generation: attachment.generation,
+                        rootPID: info.pid,
+                        platform: process.platform as Parameters<typeof rt.svc.terminate>[1]["platform"],
+                      })
+                      .catch(() => {})
+                  }
+                }
+                return
+              }
+              if (msg && msg.type === "pty.detach") {
+                // Close the attachment without terminating the PTY. The local
+                // user exits the visible window; the PTY keeps running for
+                // any future attach.
+                try {
+                  wsRef?.close()
+                } catch {}
+                return
+              }
+            } catch {}
+          }
+          // kilocode_change end
           if (!ready) {
             pending.push(event.data)
             return

@@ -55,6 +55,7 @@ import { Config } from "./config/config"
 import { Auth } from "./auth"
 // kilocode_change end
 import { DbCommand } from "./cli/cmd/db"
+import { SharedTerminalCommand } from "./kilocode/shared-terminal/command" // kilocode_change
 import path from "path"
 import { Global } from "./global"
 import { createHelpCommand } from "./kilocode/help-command" // kilocode_change
@@ -214,6 +215,7 @@ let cli = yargs(hideBin(process.argv)) // kilocode_change
   .command(ConfigCLICommand) // kilocode_change
   .command(PluginCommand)
   .command(DbCommand)
+  .command(SharedTerminalCommand) // kilocode_change
 
 // kilocode_change start - registered after initial chain to avoid self-referential type error
 cli = cli.command(createHelpCommand(() => cli))

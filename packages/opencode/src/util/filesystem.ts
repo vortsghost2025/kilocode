@@ -107,9 +107,17 @@ export namespace Filesystem {
   export function normalizePath(p: string): string {
     if (process.platform !== "win32") return p
     try {
-      return realpathSync.native(p)
+      // kilocode_change start - forward-slash canonicalisation
+      // realpathSync.native() returns OS-native backslash paths on Windows,
+      // but the session store and TUI directory filter historically use
+      // forward-slash paths. Normalise to forward slashes so cache keys,
+      // session.directory rows, and the session-list filter agree.
+      const n = realpathSync.native(p)
+      return n.replace(/\\/g, "/")
+      // kilocode_change end
     } catch {
-      return p
+      // kilocode_change - preserve forward-slash canonicalisation on the fallback path
+      return p.replace(/\\/g, "/")
     }
   }
 

@@ -7,8 +7,11 @@ import { useSDK } from "../../context/sdk" // kilocode_change
 import { createStore } from "solid-js/store"
 import { useRoute } from "../../context/route"
 import { RemoteIndicator } from "@/kilocode/remote-tui" // kilocode_change
+import type { TuiTerminalState } from "@/kilocode/shared-terminal/tui" // kilocode_change
+import { useKeybind } from "../../context/keybind" // kilocode_change
 
-export function Footer() {
+export function Footer(props: { terminal?: TuiTerminalState }) {
+  // kilocode_change
   const { theme } = useTheme()
   const sync = useSync()
   const route = useRoute()
@@ -22,6 +25,7 @@ export function Footer() {
   const directory = useDirectory()
   const connected = useConnected()
   const sdk = useSDK() // kilocode_change
+  const keybind = useKeybind() // kilocode_change
 
   const [store, setStore] = createStore({
     welcome: false,
@@ -56,6 +60,20 @@ export function Footer() {
     <box flexDirection="row" justifyContent="space-between" gap={1} flexShrink={0}>
       <text fg={theme.textMuted}>{directory()}</text>
       <box gap={2} flexDirection="row" flexShrink={0}>
+        {/* kilocode_change start - shared terminal footer actions */}
+        <Show when={props.terminal}>
+          <box flexDirection="row" gap={1} onMouseUp={() => void props.terminal!.toggle().catch(() => {})}>
+            <text fg={props.terminal!.visible() ? theme.primary : theme.text}>
+              ▣ terminal <span style={{ fg: theme.textMuted }}>{keybind.print("terminal_toggle")}</span>
+            </text>
+          </box>
+          <Show when={props.terminal!.info()}>
+            <text fg={theme.error} onMouseUp={() => void props.terminal!.terminate().catch(() => {})}>
+              terminate
+            </text>
+          </Show>
+        </Show>
+        {/* kilocode_change end */}
         <RemoteIndicator sdk={sdk} theme={theme} kilo={sync.data.provider_next.connected.includes("kilo")} />
         <Switch>
           <Match when={store.welcome}>

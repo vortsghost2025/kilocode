@@ -29,6 +29,10 @@ import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
 import { Log } from "@/util/log"
 import { useToast } from "@tui/ui/toast" // kilocode_change
+
+// kilocode_change start — import session-scoped auto-approve controller
+import * as AutoApprove from "@/kilocode/permission/auto-approve"
+// kilocode_change end
 import type { Path } from "@kilocode/sdk"
 import type { Workspace } from "@kilocode/sdk/v2"
 
@@ -178,6 +182,37 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
         case "permission.asked": {
           const request = event.properties
+          // kilocode_change start — session-scoped auto-approve intercept
+          if (AutoApprove.isEnabled(request.sessionID)) {
+            const acquired = AutoApprove.tryAcquire(request.sessionID, request.id)
+            if (acquired) {
+              sdk.client.permission
+                .reply({ reply: "once", requestID: request.id })
+                .then(() => {
+                  const perm = store.permission[request.sessionID]
+                  if (!perm) return
+                  const idx = Binary.search(perm, request.id, (r) => r.id)
+                  if (idx.found) {
+                    setStore(
+                      "permission",
+                      request.sessionID,
+                      produce((draft) => {
+                        draft.splice(idx.index, 1)
+                      }),
+                    )
+                  }
+                })
+                .catch((err) => {
+                  AutoApprove.release(request.sessionID, request.id)
+                  toast.show({
+                    variant: "error",
+                    message: `Auto-approve failed: ${err instanceof Error ? err.message : String(err)}`,
+                  })
+                })
+              break
+            }
+          }
+          // kilocode_change end
           const requests = store.permission[request.sessionID]
           if (!requests) {
             setStore("permission", request.sessionID, [request])

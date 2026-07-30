@@ -1,7 +1,7 @@
 ---
 description: read-only test failure diagnosis agent
 mode: subagent
-model: kilo/tencent/hy3:free
+model: nvidia/deepseek-ai/deepseek-v4-pro
 permission:
   "*": deny
   read: allow

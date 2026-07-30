@@ -197,7 +197,7 @@
       },
     },
     "debug": {
-      "model": "kilo/tencent/hy3:free",
+      "model": "nvidia/thinkingmachines/inkling",
       "mode": "subagent",
       "permission": {
         "read": "allow",

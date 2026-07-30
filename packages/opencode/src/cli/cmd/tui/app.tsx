@@ -64,20 +64,16 @@ import { PromptRefProvider, usePromptRef } from "./context/prompt"
 import { registerKiloCommands } from "@/kilocode/kilo-commands" // kilocode_change
 import { KiloClawView } from "@/kilocode/claw/view" // kilocode_change
 import { UserTerminal } from "@/kilocode/user-terminal/launch" // kilocode_change
+import type { TuiTerminalClient } from "@/kilocode/shared-terminal/tui" // kilocode_change
+import { SharedTerminalDebug } from "@/kilocode/shared-terminal/debug" // kilocode_change
 import { initializeTUIDependencies } from "@kilocode/kilo-gateway/tui" // kilocode_change
 import { TuiConfigProvider, useTuiConfig } from "./context/tui-config"
 import { TuiConfig } from "@/config/tui"
 import { createTuiApi, TuiPluginRuntime, type RouteMap } from "./plugin"
 import { FormatError, FormatUnknownError } from "@/cli/error"
 
-// kilocode_change start
-function isAllowEverything(permission: unknown): boolean {
-  if (typeof permission !== "object" || permission === null) return false
-  const wildcard = (permission as Record<string, unknown>)["*"]
-  if (typeof wildcard === "string") return wildcard === "allow"
-  if (typeof wildcard === "object" && wildcard !== null) return (wildcard as Record<string, unknown>)["*"] === "allow"
-  return false
-}
+// kilocode_change start — import session-scoped auto-approve controller
+import * as AutoApprove from "@/kilocode/permission/auto-approve"
 // kilocode_change end
 
 async function getTerminalBackgroundColor(): Promise<"dark" | "light"> {
@@ -183,7 +179,13 @@ export function tui(input: {
   url: string
   args: Args
   config: TuiConfig.Info
+  terminal?: TuiTerminalClient // kilocode_change
   onSnapshot?: () => Promise<string[]>
+  onSharedTerminal?: (input: { sessionID: string; directory: string }) => Promise<{
+    ok: boolean
+    reason?: string
+    message?: string
+  }>
   directory?: string
   fetch?: typeof fetch
   headers?: RequestInit["headers"]
@@ -191,7 +193,14 @@ export function tui(input: {
 }) {
   // promise to prevent immediate exit
   return new Promise<void>(async (resolve) => {
+    void SharedTerminalDebug.reset() // kilocode_change
     const unguard = win32InstallCtrlCGuard()
+    process.on("SIGTERM", () => {
+      void SharedTerminalDebug.dumpCounts()
+    })
+    process.on("SIGINT", () => {
+      void SharedTerminalDebug.dumpCounts()
+    })
     win32DisableProcessedInput()
 
     const mode = await getTerminalBackgroundColor()
@@ -201,6 +210,7 @@ export function tui(input: {
     win32DisableProcessedInput()
 
     const onExit = async () => {
+      void SharedTerminalDebug.dumpCounts() // kilocode_change
       unguard?.()
       resolve()
     }
@@ -241,7 +251,9 @@ export function tui(input: {
                                       <FrecencyProvider>
                                         <PromptHistoryProvider>
                                           <PromptRefProvider>
-                                            <App onSnapshot={input.onSnapshot} />
+                                            {/* kilocode_change start */}
+                                            <App onSnapshot={input.onSnapshot} terminal={input.terminal} />
+                                            {/* kilocode_change end */}
                                           </PromptRefProvider>
                                         </PromptHistoryProvider>
                                       </FrecencyProvider>
@@ -265,7 +277,10 @@ export function tui(input: {
   })
 }
 
-function App(props: { onSnapshot?: () => Promise<string[]> }) {
+function App(props: {
+  onSnapshot?: () => Promise<string[]>
+  terminal?: TuiTerminalClient // kilocode_change
+}) {
   const tuiConfig = useTuiConfig()
   const route = useRoute()
   const dimensions = useTerminalDimensions()
@@ -318,6 +333,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     })
 
   useKeyboard((evt) => {
+    SharedTerminalDebug.traceKey("renderer_received_event", evt) // kilocode_change
     if (!Flag.KILO_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) return
     if (!renderer.getSelection()) return
 
@@ -863,19 +879,28 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     // kilocode_change start
     {
       get title() {
-        return isAllowEverything(sync.data.config.permission) ? "Disable auto-approve mode" : "Enable auto-approve mode"
+        const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
+        if (!sessionID) return "Enable auto-approve mode"
+        return AutoApprove.isEnabled(sessionID) ? "Disable auto-approve mode" : "Enable auto-approve mode"
       },
       value: "permission.allow_everything",
       category: "System",
       onSelect: async (dialog) => {
-        const enabled = isAllowEverything(sync.data.config.permission)
-        const result = await sdk.client.permission.allowEverything({ enable: !enabled })
-        if (result.error) {
-          toast.show({
-            variant: "error",
-            message: `Failed to ${!enabled ? "enable" : "disable"} auto-approve mode`,
-          })
+        const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
+        if (!sessionID) {
+          toast.show({ variant: "error", message: "No active session to enable auto-approve for" })
           return
+        }
+        const nowEnabled = AutoApprove.toggle(sessionID)
+        if (nowEnabled) {
+          const pending = sync.data.permission[sessionID] ?? []
+          for (const req of [...pending]) {
+            try {
+              await sdk.client.permission.reply({ reply: "once", requestID: req.id })
+            } catch {
+              AutoApprove.release(sessionID, req.id)
+            }
+          }
         }
         dialog.clear()
       },
@@ -1043,7 +1068,9 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
             <Home />
           </Match>
           <Match when={route.data.type === "session"}>
-            <Session />
+            {/* kilocode_change start */}
+            <Session terminal={Flag.KILO_EXPERIMENTAL_SHARED_TERMINAL ? props.terminal : undefined} />
+            {/* kilocode_change end */}
           </Match>
           {/* kilocode_change start */}
           <Match when={route.data.type === "kiloclaw"}>

@@ -883,6 +883,7 @@ export namespace Config {
       session_child_cycle: z.string().optional().default("right").describe("Go to next child session"),
       session_child_cycle_reverse: z.string().optional().default("left").describe("Go to previous child session"),
       session_parent: z.string().optional().default("up").describe("Go to parent session"),
+      terminal_toggle: z.string().optional().default("<leader>j").describe("Toggle shared terminal panel"), // kilocode_change
       terminal_suspend: z.string().optional().default("ctrl+z").describe("Suspend terminal"),
       terminal_title_toggle: z.string().optional().default("none").describe("Toggle terminal title"),
       tips_toggle: z.string().optional().default("<leader>h").describe("Toggle tips on home screen"),

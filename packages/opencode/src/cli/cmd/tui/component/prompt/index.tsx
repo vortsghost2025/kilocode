@@ -38,6 +38,7 @@ import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
 import { useTextareaKeybindings } from "../textarea-keybindings"
 import { DialogSkill } from "../dialog-skill"
+import { dispatchLocalInput, dispatchSlashCommand } from "./slash-dispatch" // kilocode_change
 import { shouldSummarize as shouldPasteSummary } from "@/kilocode/paste-summary"
 
 export type PromptProps = {
@@ -46,7 +47,14 @@ export type PromptProps = {
   visible?: boolean
   disabled?: boolean
   onSubmit?: () => void
+  onShell?: (command: string) => void | Promise<void> // kilocode_change
   ref?: (ref: PromptRef) => void
+  // kilocode_change start - fired when the human clicks the chat textarea to
+  // steal focus back from the visible shared-terminal panel. Lets the session
+  // deactivate the terminal's keyboard ownership so Backspace reaches the
+  // prompt instead of the PTY while the terminal stays visible and attached.
+  onStealFocus?: () => void
+  // kilocode_change end
   hint?: JSX.Element
   showPlaceholder?: boolean
   placeholders?: {
@@ -673,12 +681,43 @@ export function Prompt(props: PromptProps) {
   async function submit() {
     if (props.disabled) return
     if (autocomplete?.visible) return
-    if (!store.prompt.input) return
+    if (!store.prompt.input && !(store.mode === "shell" && props.onShell)) return // kilocode_change
     const trimmed = store.prompt.input.trim()
     if (trimmed === "exit" || trimmed === "quit" || trimmed === ":q") {
       exit()
       return
     }
+    // kilocode_change start - local terminal and slash dispatch must happen
+    // before model selection, session command routing, or provider submission.
+    const localHistory = { ...store.prompt, mode: store.mode }
+    const localInput = dispatchLocalInput({
+      inputText: store.prompt.input,
+      shellMode: store.mode === "shell",
+      localSlashes: command.slashes(),
+      bang: props.onShell,
+      callbacks: {
+        clearInput() {
+          input.extmarks.clear()
+          setStore("prompt", { input: "", parts: [] })
+          setStore("extmarkToPartIndex", new Map())
+          setStore("mode", "normal")
+        },
+        async invokeLocal(slash) {
+          await slash.onSelect()
+        },
+        reportLocalError(err) {
+          console.error("Local prompt command failed:", err)
+          toast.show({ message: String(err), variant: "error" })
+        },
+      },
+    })
+    if (localInput) {
+      history.append(localHistory)
+      input.clear()
+      props.onSubmit?.()
+      return
+    }
+    // kilocode_change end
     const selectedModel = local.model.current()
     if (!selectedModel) {
       promptModelWarning()
@@ -742,55 +781,55 @@ export function Prompt(props: PromptProps) {
         command: inputText,
       })
       setStore("mode", "normal")
-    } else if (
-      inputText.startsWith("/") &&
-      iife(() => {
-        const firstLine = inputText.split("\n")[0]
-        const command = firstLine.split(" ")[0].slice(1)
-        return sync.data.command.some((x) => x.name === command)
-      })
-    ) {
-      // Parse command from first line, preserve multi-line content in arguments
-      const firstLineEnd = inputText.indexOf("\n")
-      const firstLine = firstLineEnd === -1 ? inputText : inputText.slice(0, firstLineEnd)
-      const [command, ...firstLineArgs] = firstLine.split(" ")
-      const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
-      const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
-
-      sdk.client.session.command({
-        sessionID,
-        command: command.slice(1),
-        arguments: args,
-        agent: local.agent.current()?.name ?? "", // kilocode_change
-        model: `${selectedModel.providerID}/${selectedModel.modelID}`,
-        messageID,
-        variant,
-        parts: nonTextParts
-          .filter((x) => x.type === "file")
-          .map((x) => ({
-            id: PartID.ascending(),
-            ...x,
-          })),
-      })
     } else {
-      sdk.client.session
-        .prompt({
-          sessionID,
-          ...selectedModel,
-          messageID,
-          agent: local.agent.current()?.name ?? "", // kilocode_change
-          model: selectedModel,
-          variant,
-          parts: [
-            {
-              id: PartID.ascending(),
-              type: "text",
-              text: inputText,
-            },
-            ...nonTextParts.map(assign),
-          ],
-        })
-        .catch(() => {})
+      // kilocode_change start
+      const localSlashes = command.slashes()
+      const serverCommandNames = new Set(sync.data.command.map((c) => c.name))
+      dispatchSlashCommand({
+        inputText,
+        localSlashes,
+        serverCommandNames,
+        callbacks: {
+          clearInput() {
+            input.extmarks.clear()
+            setStore("prompt", { input: "", parts: [] })
+            setStore("extmarkToPartIndex", new Map())
+          },
+          async invokeLocal(slash) {
+            await slash.onSelect()
+          },
+          reportLocalError(err) {
+            console.error("Local slash command failed:", err)
+            toast.show({ message: String(err), variant: "error" })
+          },
+          invokeServerCommand(cmd, args) {
+            sdk.client.session.command({
+              sessionID,
+              command: cmd,
+              arguments: args,
+              agent: local.agent.current()?.name ?? "",
+              model: `${selectedModel.providerID}/${selectedModel.modelID}`,
+              messageID,
+              variant,
+              parts: nonTextParts.filter((x) => x.type === "file").map((x) => ({ id: PartID.ascending(), ...x })),
+            })
+          },
+          invokeProviderPrompt(fullText) {
+            sdk.client.session
+              .prompt({
+                sessionID,
+                ...selectedModel,
+                messageID,
+                agent: local.agent.current()?.name ?? "",
+                model: selectedModel,
+                variant,
+                parts: [{ id: PartID.ascending(), type: "text", text: fullText }, ...nonTextParts.map(assign)],
+              })
+              .catch(() => {})
+          },
+        },
+      })
+      // kilocode_change end
     }
     toast.dismiss() // kilocode_change - dismiss persistent config warning on first submit
     history.append({
@@ -1172,7 +1211,15 @@ export function Prompt(props: PromptProps) {
                   input.cursorColor = theme.text
                 }, 0)
               }}
-              onMouseDown={(r: MouseEvent) => r.target?.focus()}
+              onMouseDown={(r: MouseEvent) => {
+                r.target?.focus()
+                // kilocode_change start - real focus-acquisition path: the
+                // human clicked the chat textarea. Notify the session so it
+                // can drop the visible terminal's inputActive flag and let
+                // Backspace/Enter reach this prompt instead of the PTY.
+                props.onStealFocus?.()
+                // kilocode_change end
+              }}
               focusedBackgroundColor={theme.backgroundElement}
               cursorColor={theme.text}
               syntaxStyle={syntax()}
